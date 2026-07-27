@@ -203,6 +203,29 @@ provisioning failed in an otherwise empty VM, the cleanest response is usually
 to preserve logs, delete that failed guest, correct the cause, and create a new
 VM. Do not add provider credentials to a partially provisioned guest.
 
+### Claude Code reports `EACCES` under `~/.local/share`
+
+Repository revisions before the ownership fix could create `~/.local` and
+`~/.local/share` as `root` while creating only their child directories as the
+guest user. Claude Code then failed with:
+
+```text
+EACCES: permission denied, mkdir '/home/agent/.local/share/claude'
+```
+
+Confirm the diagnosis inside the guest:
+
+```bash
+stat -c '%U:%G %a %n' \
+  "$HOME/.local" "$HOME/.local/share" "$HOME/.local/bin"
+```
+
+The current script explicitly creates every XDG parent with guest ownership and
+passes conventional `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, and
+`XDG_CACHE_HOME` values to user-level installers. For a credential-free failed
+VM, retain the logs and recreate it with the corrected script. That gives a
+cleaner result than completing an unknown partial installer state manually.
+
 ## The GUI shows only a console or black screen
 
 Provisioning begins from a server cloud image. The desktop appears only after

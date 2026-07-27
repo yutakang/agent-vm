@@ -192,6 +192,29 @@ Script は credential を追加しません。空の VM 内で provisioning に�
 log を保存し、失敗 guest を削除し、原因を直して新 VM を作るのが通常最も clean です。
 部分的に provision された guest へ provider credential を追加しないでください。
 
+### Claude Code が `~/.local/share` で `EACCES` を報告する
+
+Ownership 修正前の repository では、子 directory だけを guest user 所有で作る一方、
+`~/.local` と `~/.local/share` が `root` 所有で作られる場合がありました。その場合、
+Claude Code は次のように失敗します。
+
+```text
+EACCES: permission denied, mkdir '/home/agent/.local/share/claude'
+```
+
+Guest 内で診断を確認できます。
+
+```bash
+stat -c '%U:%G %a %n' \
+  "$HOME/.local" "$HOME/.local/share" "$HOME/.local/bin"
+```
+
+現在の script は XDG の各親 directory を明示的に guest 所有で作り、user-level
+installer に通常の `XDG_CONFIG_HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME`、
+`XDG_CACHE_HOME` を渡します。Credential をまだ入れていない失敗 VM なら、log を保存し、
+修正版 script で作り直す方が、不明な partial installer state を手作業で完成させる
+より clean です。
+
 ## GUI が console/black screen のまま
 
 Provisioning は server cloud image から始まります。`ubuntu-desktop-minimal` と

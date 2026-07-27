@@ -80,8 +80,13 @@ It deliberately does **not**:
 - sign in to OpenAI, Anthropic, GitHub, Ollama Cloud, or another service;
 - download Ollama model weights;
 - mount the host home directory or a project directory in the guest;
-- configure USB passthrough, SSH-agent forwarding, or a LAN-facing VM console; or
-- choose a model provider.
+- configure USB passthrough, SSH-agent forwarding, or a LAN-facing VM console;
+- choose a model provider; or
+- install the former `formal_methods` profile.
+
+Formal-methods tools are project-specific and can be installed manually inside
+a VM that needs them. Users who only need an agent environment no longer pay
+their maintenance or provisioning cost.
 
 ## Requirements
 

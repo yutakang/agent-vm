@@ -537,7 +537,12 @@ systemctl enable ufw.service
 ufw status verbose
 
 install -d -o "$guest_user" -g "$guest_group" -m 0755 \
+  "$guest_home/.local" \
   "$guest_home/.local/bin" \
+  "$guest_home/.local/share" \
+  "$guest_home/.local/state" \
+  "$guest_home/.config" \
+  "$guest_home/.cache" \
   "$guest_home/.local/share/kvm-agent"
 
 cat > /etc/profile.d/kvm-agent-tools.sh <<'PROFILE'
@@ -560,6 +565,10 @@ chown "$guest_user:$guest_group" "$guest_home/.profile"
 as_guest() {
   runuser -u "$guest_user" -- \
     env HOME="$guest_home" USER="$guest_user" LOGNAME="$guest_user" \
+      XDG_CONFIG_HOME="$guest_home/.config" \
+      XDG_DATA_HOME="$guest_home/.local/share" \
+      XDG_STATE_HOME="$guest_home/.local/state" \
+      XDG_CACHE_HOME="$guest_home/.cache" \
       PATH="$guest_path" "$@"
 }
 

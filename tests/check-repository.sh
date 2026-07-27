@@ -37,6 +37,43 @@ awk '
   "could not extract embedded guest provisioning script"
 bash -n "$TEMP_DIR/guest-provision.sh"
 
+awk '
+  /^install -d -o "\$guest_user" -g "\$guest_group"/ {
+    capture = 1
+  }
+  capture {
+    print
+  }
+  capture && /\$guest_home\/\.local\/share\/kvm-agent/ {
+    exit
+  }
+' "$TEMP_DIR/guest-provision.sh" > "$TEMP_DIR/guest-owned-directories"
+[[ -s "$TEMP_DIR/guest-owned-directories" ]] || fail \
+  "could not extract guest-owned directory creation"
+
+# Regression check for the real Claude Code EACCES failure: GNU install creates
+# omitted parents as root, so every XDG parent must be an explicit owned target.
+for guest_directory in \
+    '"$guest_home/.local"' \
+    '"$guest_home/.local/bin"' \
+    '"$guest_home/.local/share"' \
+    '"$guest_home/.local/state"' \
+    '"$guest_home/.config"' \
+    '"$guest_home/.cache"' \
+    '"$guest_home/.local/share/kvm-agent"'; do
+  grep -Fq -- "$guest_directory" "$TEMP_DIR/guest-owned-directories" \
+    || fail "guest provisioning omits owned directory: $guest_directory"
+done
+
+for guest_environment in \
+    'XDG_CONFIG_HOME="$guest_home/.config"' \
+    'XDG_DATA_HOME="$guest_home/.local/share"' \
+    'XDG_STATE_HOME="$guest_home/.local/state"' \
+    'XDG_CACHE_HOME="$guest_home/.cache"'; do
+  grep -Fq -- "$guest_environment" "$TEMP_DIR/guest-provision.sh" \
+    || fail "guest provisioning omits environment: $guest_environment"
+done
+
 for required in \
     README.md README_jp.md \
     SECURITY.md SECURITY_jp.md \
