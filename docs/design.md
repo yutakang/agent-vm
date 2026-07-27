@@ -1,0 +1,184 @@
+# Design and trust boundaries
+
+[日本語版](design_jp.md)
+
+## Why one script
+
+The previous repository separated host installation, account creation, image
+fetching, VM creation, cloud-init templates, online and offline tool bundles,
+formal-methods profiles, and guest helpers. That design exposed many controls,
+but the ordinary personal workflow required understanding the implementation
+before creating one VM.
+
+The current design keeps only one operator-facing action:
+
+```bash
+./setup-kvm-agent.sh
+```
+
+The file still has internal phases and fails closed at important boundaries, but
+the user no longer moves between host accounts, configuration files, helper
+scripts, or provisioning modes.
+
+## Control and data flow
+
+```mermaid
+sequenceDiagram
+    actor U as Host user
+    participant S as Setup script
+    participant L as libvirt/KVM
+    participant G as Ubuntu guest
+    participant P as Upstream installers
+
+    U->>S: Run once and choose GUI password
+    S->>S: Install Ubuntu host packages
+    S->>S: Verify Ubuntu signed image manifest
+    S->>L: Define graphical VM
+    L->>G: Boot cloud image with NoCloud seed
+    G->>P: Fetch current official agent releases
+    G->>G: Install desktop and five tools
+    S->>G: Wait and verify over recovery SSH
+    S->>G: Disable future cloud-init runs
+    S->>L: Detach and remove NoCloud seed
+    U->>L: Daily use through virt-manager
+```
+
+The coding-agent installers never run in the script's host process. Cloud-init
+copies an embedded guest provisioning program into the VM and executes it there.
+The host waits over a dedicated SSH key so a guest failure is visible rather
+than being mistaken for success.
+
+## Why a cloud image plus desktop
+
+An Ubuntu Desktop ISO and the `virt-manager` installation wizard are excellent
+for a manually built VM, but they cannot provide one unattended command that
+also installs the requested agents. An official Ubuntu Server cloud image has
+cloud-init and can be created without automating graphical installer screens.
+The guest then installs `ubuntu-desktop-minimal`, GNOME's display manager,
+`spice-vdagent`, and `qemu-guest-agent`.
+
+The result is a normal graphical Ubuntu environment for daily use while keeping
+the creation process scriptable. After successful provisioning and any required
+first reboot, the host disables future cloud-init runs in that guest, detaches
+the NoCloud seed, and removes the seed file.
+
+## Why system libvirt
+
+The script uses `qemu:///system`, the same connection normally shown by
+`virt-manager`. System libvirt:
+
+- keeps VMs running independently of one terminal process;
+- gives `virt-manager`, `virt-viewer`, and `virsh` a consistent inventory;
+- stores VM disks under `/var/lib/libvirt/images`;
+- uses Ubuntu's libvirt service confinement and device permissions; and
+- allows the host user to log out without terminating the guest.
+
+The host user is added to `libvirt` only. This is administrative power, not a
+sandbox: that account can control the guests and should remain trusted.
+
+## Graphics choices
+
+The VM uses:
+
+| Device | Reason |
+|---|---|
+| SPICE display with no TCP listener (`listen=none`) | Rich local console, reached through libvirt, with no socket for other local accounts to attach to |
+| Virtio video | Efficient Linux guest graphics |
+| USB tablet input | Accurate pointer position without awkward mouse capture |
+| `spice-vdagent` | Dynamic desktop integration and clipboard support |
+| `qemu-guest-agent` | Reliable guest reporting and management |
+| Serial console | Recovery evidence when the desktop does not start |
+
+No 3D acceleration or GPU passthrough is configured. Local Ollama therefore
+runs on CPU unless the user deliberately changes the VM hardware and guest
+installation. Large local models are usually better placed on a separate
+GPU-equipped server with an explicitly restricted network path.
+
+## Image authentication
+
+The script downloads:
+
+- `SHA256SUMS`;
+- `SHA256SUMS.gpg`; and
+- the named Ubuntu cloud image.
+
+`gpgv` checks the manifest with Ubuntu's cloud-image keyring installed from the
+Ubuntu APT repository. `sha256sum` then checks the image against the authenticated
+manifest. A cached image is reused only when its hash matches the locally
+recorded value created after this verification.
+
+This authenticates the Ubuntu image, not every package or third-party agent
+release installed later.
+
+## Accounts
+
+| Account | Location | Purpose |
+|---|---|---|
+| Invoking Ubuntu user | Host | Trusted desktop user, sudo administrator, and libvirt operator |
+| `libvirt-qemu` or equivalent | Host service | Runs QEMU under Ubuntu's libvirt configuration |
+| `agent` | Guest | Human GUI login, coding-agent execution, and guest administration |
+| `ollama` | Guest service | Runs the loopback-only Ollama server |
+
+The guest `agent` account has passwordless sudo. Its GUI password prevents
+casual local login; it is not intended to constrain a coding agent already
+running as that user. The security boundary is the VM.
+
+The invoking host account is added to `libvirt` and to nothing else. It is not
+added to `kvm`: that group belongs to the QEMU service account, and putting a
+human in it would make the VM disk and the cloud-init seed — which carries the
+guest password hash — readable by that human's account for no benefit.
+
+Why there is no separate VM-administrator account: the split never contained
+the agent. Containment comes from KVM, and it is identical either way. What a
+split changes is what an attacker reaches after compromising the *host* desktop
+account, and what privilege the console viewer is holding while it renders
+untrusted guest output. Running everything through the guest GUI reduces how
+much else that host account does, which is a real argument for merging the two;
+it does not make the merge free. `SECURITY.md` states the residual risk and the
+one-command way to drop the ambient part of it without adding an account.
+
+## Recovery SSH
+
+The setup script creates:
+
+```text
+~/.local/share/kvm-agent/VM_NAME/id_ed25519
+```
+
+Only the public key enters the guest. Password authentication, root login, SSH
+agent forwarding, and X11 forwarding are disabled. The key is for provisioning
+status and recovery when the GUI is unavailable; daily work may remain entirely
+inside `virt-manager`.
+
+The host key is stored in a per-VM `known_hosts` file. Reusing a VM name does not
+silently share one global host-key decision with other SSH connections.
+
+## Tool installation policy
+
+Codex, Claude Code, OpenCode, and Ollama are installed from their current
+official native installer channels. Aider is installed as the guest user via
+`uv` in an isolated tool environment. The script checks that every CLI reports a
+version and that Ollama responds only on guest loopback.
+
+This is release-channel reproducibility, not byte-level reproducibility. The
+former exact pins, package locks, signed offline ISO path, and formal-methods
+toolchain were removed to make the ordinary setup small and maintainable. Users
+with institutional artifact-review requirements should build an internally
+signed golden image instead of treating this personal convenience path as a
+supply-chain guarantee.
+
+## Deliberately omitted features
+
+- separate `vmadmin` and `devui` host accounts;
+- offline agent bundles;
+- host/guest shared inboxes;
+- automatic GitHub fork or deploy-key setup;
+- VS Code installation on the host;
+- formal-methods profiles;
+- host-enforced network policy: the private-network block is a guest firewall,
+  not a libvirt `nwfilter`;
+- GPU and USB passthrough; and
+- automatic VM destruction.
+
+These can be useful in a particular organization, but none is necessary to
+create and operate a graphical disposable agent VM.

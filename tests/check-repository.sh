@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+SETUP_SCRIPT="${REPO_DIR}/setup-kvm-agent.sh"
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+bash -n "$SETUP_SCRIPT"
+"$SETUP_SCRIPT" --help >/dev/null
+[[ -x "$SETUP_SCRIPT" ]] || fail "setup-kvm-agent.sh is not executable"
+if ((EUID == 0)); then
+  root_output="$("$SETUP_SCRIPT" --name root-guard-test 2>&1 || true)"
+  grep -Fq "not as root" <<< "$root_output" || fail \
+    "setup script did not reject direct root execution"
+fi
+
+TEMP_DIR="$(mktemp -d)"
+trap 'rm -rf -- "$TEMP_DIR"' EXIT
+
+awk '
+  /^cat > "\$WORK_DIR\/guest-provision.sh" <<'\''GUEST_SCRIPT'\''$/ {
+    capture = 1
+    next
+  }
+  /^GUEST_SCRIPT$/ {
+    capture = 0
+  }
+  capture
+' "$SETUP_SCRIPT" > "$TEMP_DIR/guest-provision.sh"
+[[ -s "$TEMP_DIR/guest-provision.sh" ]] || fail \
+  "could not extract embedded guest provisioning script"
+bash -n "$TEMP_DIR/guest-provision.sh"
+
+for required in \
+    README.md README_jp.md \
+    SECURITY.md SECURITY_jp.md \
+    DISCLAIMER.md DISCLAIMER_jp.md \
+    docs/design.md docs/design_jp.md \
+    docs/daily-use.md docs/daily-use_jp.md \
+    docs/credentials.md docs/credentials_jp.md \
+    docs/agent-tools-and-model-services.md \
+    docs/agent-tools-and-model-services_jp.md \
+    docs/troubleshooting.md docs/troubleshooting_jp.md \
+    docs/references.md docs/references_jp.md; do
+  [[ -s "${REPO_DIR}/${required}" ]] || fail "missing or empty: $required"
+done
+
+for required_text in \
+    "https://chatgpt.com/codex/install.sh" \
+    "https://claude.ai/install.sh" \
+    "https://opencode.ai/install" \
+    "aider-chat@latest" \
+    "https://ollama.com/install.sh" \
+    "OLLAMA_HOST=127.0.0.1:11434" \
+    "ubuntu-desktop-minimal" \
+    "graphics \"spice,listen=none\"" \
+    "ForwardAgent=no" \
+    "ufw default deny incoming" \
+    "ufw --force enable" \
+    "/etc/cloud/cloud-init.disabled" \
+    "usermod -aG libvirt --"; do
+  grep -Fq -- "$required_text" "$SETUP_SCRIPT" \
+    || fail "setup script is missing: $required_text"
+done
+
+for forbidden_text in \
+    "/tmp/kvm-agent-install-" \
+    "usermod -aG libvirt,kvm" \
+    "ufw --force disable" \
+    "listen=127.0.0.1"; do
+  grep -Fq -- "$forbidden_text" "$SETUP_SCRIPT" \
+    && fail "setup script still contains: $forbidden_text"
+done
+
+[[ ! -d "${REPO_DIR}/formal-methods" ]] || fail \
+  "obsolete formal-methods directory still exists"
+[[ ! -d "${REPO_DIR}/host" ]] || fail \
+  "obsolete multi-script host directory still exists"
+[[ ! -d "${REPO_DIR}/toolchain" ]] || fail \
+  "obsolete toolchain directory still exists"
+
+python3 - "$REPO_DIR" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+root = Path(sys.argv[1])
+missing = []
+pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+
+for source in root.rglob("*.md"):
+    for target in pattern.findall(source.read_text(encoding="utf-8")):
+        if "://" in target or target.startswith("#") or target.startswith("mailto:"):
+            continue
+        path_text = target.split("#", 1)[0]
+        if not path_text:
+            continue
+        resolved = (source.parent / path_text).resolve()
+        if not resolved.exists():
+            missing.append(f"{source.relative_to(root)} -> {target}")
+
+if missing:
+    print("Broken local Markdown links:", file=sys.stderr)
+    for item in missing:
+        print(f"  {item}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+
+"${SCRIPT_DIR}/mock-setup.sh"
+
+echo "Repository checks passed."
