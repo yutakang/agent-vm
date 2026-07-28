@@ -135,6 +135,7 @@ for required_disk_safety in \
     "Root filesystem is smaller than 90%" \
     "emergency-space.reserve" \
     "qemu-img info --output=json" \
+    "json.load(sys.stdin)" \
     "minimum_host_free_gib=30"; do
   grep -Fq -- "$required_disk_safety" "$SETUP_SCRIPT" \
     || fail "disk-capacity protection is missing: $required_disk_safety"

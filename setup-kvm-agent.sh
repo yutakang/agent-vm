@@ -90,6 +90,24 @@ die() {
   exit 1
 }
 
+parse_qemu_virtual_size_bytes() {
+  python3 -c '
+import json
+import sys
+
+try:
+    info = json.load(sys.stdin)
+except (json.JSONDecodeError, OSError, TypeError, ValueError):
+    raise SystemExit(1)
+
+value = info.get("virtual-size") if isinstance(info, dict) else None
+if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    raise SystemExit(1)
+
+print(value)
+'
+}
+
 guest_ipv4_addresses() {
   LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" \
     domifaddr "$VM_NAME" --source lease 2>/dev/null \
@@ -559,6 +577,7 @@ sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
   virtinst \
   cloud-image-utils \
   qemu-utils \
+  python3 \
   ubuntu-keyring \
   ca-certificates \
   curl \
@@ -1385,15 +1404,19 @@ cloud-localds "$WORK_DIR/seed.img" \
 sudo install -o root -g root -m 0600 "$WORK_DIR/seed.img" "$SEED_IMAGE"
 sudo cp --reflink=auto --sparse=always "$BASE_IMAGE" "$VM_DISK"
 sudo qemu-img resize "$VM_DISK" "${DISK_GB}G"
-vm_virtual_bytes="$(
-  sudo qemu-img info --output=json "$VM_DISK" \
-    | sed -n \
-        's/^[[:space:]]*"virtual-size":[[:space:]]*\([0-9][0-9]*\),\{0,1\}[[:space:]]*$/\1/p'
-)"
-[[ "$vm_virtual_bytes" =~ ^[1-9][0-9]*$ ]] || die \
-  "Could not verify the qcow2 virtual size after resizing."
-((vm_virtual_bytes >= requested_disk_bytes)) || die \
-  "The qcow2 image did not grow to the requested ${DISK_GB} GiB."
+if ! qemu_info_json="$(
+    sudo qemu-img info --output=json "$VM_DISK"
+  )"; then
+  die "qemu-img could not inspect the qcow2 image after resizing."
+fi
+if ! vm_virtual_bytes="$(
+    printf '%s\n' "$qemu_info_json" | parse_qemu_virtual_size_bytes
+  )"; then
+  die "qemu-img returned invalid JSON or no positive integer virtual-size."
+fi
+if ((vm_virtual_bytes < requested_disk_bytes)); then
+  die "The qcow2 image reports ${vm_virtual_bytes} bytes after resizing; at least ${requested_disk_bytes} bytes (${DISK_GB} GiB) were requested."
+fi
 sudo chown root:kvm "$VM_DISK"
 sudo chmod 0660 "$VM_DISK"
 CREATED_VM_ARTIFACTS="yes"

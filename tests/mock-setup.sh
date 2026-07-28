@@ -189,12 +189,10 @@ case "${1:-}" in
     ;;
   info)
     virtual_bytes="$(cat "$MOCK_STATE/qemu-virtual-bytes")"
-    cat <<OUTPUT
-{
-    "virtual-size": ${virtual_bytes},
-    "format": "qcow2"
-}
-OUTPUT
+    # QEMU JSON is valid regardless of whitespace and may be emitted compactly.
+    # Keep this on one line so a line-oriented sed parser cannot pass the test.
+    printf '{"format":"qcow2","virtual-size":%s,"actual-size":4096}\n' \
+      "$virtual_bytes"
     ;;
   *)
     echo "Unexpected mocked qemu-img command: $*" >&2

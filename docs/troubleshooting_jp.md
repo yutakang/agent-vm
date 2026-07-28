@@ -178,6 +178,29 @@ ssh-keygen -R VM_ADDRESS \
 
 Global に host-key checking を無効化してはいけません。
 
+## qcow2 virtual size を検証できないと表示される
+
+Version 11 は image 自体を正常に拡張していても、`qemu-img` の
+`virtual-size` を行単位の式で抽出していました。そのため `qemu-img` が正当な
+compact JSON を返す環境では、image がすでに 120 GiB でも `virt-install` より前に
+検証が失敗する可能性がありました。
+
+現在の setup は JSON の構造を解析し、mock workflow でも compact output を検査
+します。Version 11 の失敗後は libvirt domain がないまま、新しい main disk と
+seed だけが残る場合があります。これらを手作業で削除しないでください。
+Credential をまだ入れていない disposable guest なら、現在の repository から
+次を再実行します。
+
+```bash
+./setup-kvm-agent.sh \
+  --replace-existing \
+  --name kvm-agent \
+  --formal-methods
+```
+
+Removal helper は選択した VM の管理対象 artifact だけを一覧確認して削除し、
+その後に再構築します。
+
 ## Provisioning が容量不足を報告する、または GUI login loop になる
 
 Root 容量検証の修正前は、qcow2 device を拡大しても、desktop と toolchain の

@@ -188,6 +188,28 @@ ssh-keygen -R VM_ADDRESS \
 
 Never disable host-key checking globally.
 
+## Setup says it could not verify the qcow2 virtual size
+
+Version 11 resized the image correctly but extracted `virtual-size` with a
+line-oriented expression. Valid compact JSON from `qemu-img` could therefore
+make verification fail before `virt-install`, even when the image was already
+120 GiB.
+
+The current setup parses the JSON structurally and tests compact output in its
+mock workflow. A failed version-11 attempt may leave only the new main disk and
+seed—without a libvirt domain. Do not delete either path by hand. For a
+credential-free disposable guest, rerun the current repository with:
+
+```bash
+./setup-kvm-agent.sh \
+  --replace-existing \
+  --name kvm-agent \
+  --formal-methods
+```
+
+The removal helper inventories and removes only the selected VM's managed
+artifacts before rebuilding it.
+
 ## Provisioning reports no space or the graphical login loops
 
 Releases before the root-capacity fix enlarged the qcow2 device but did not
