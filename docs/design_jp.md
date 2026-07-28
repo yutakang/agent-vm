@@ -57,6 +57,12 @@ Ubuntu Server 公式 cloud image は cloud-init を持ち、GUI installer 画面
 できます。provisioning と必要な初回 reboot が成功した後、host はその guest での
 将来の cloud-init 実行を無効化し、NoCloud seed を detach して seed file を削除します。
 
+IP address は安定した VM identity ではないため、reboot 後の待機では libvirt の
+DHCP lease を再取得します。Host 側の待機が中断した場合は、
+`setup-kvm-agent.sh --finalize-existing` が同じ内部処理を使い、working VM を
+作り直さずに marker 検証、cloud-init 無効化、fail-closed な seed detach を
+再実行します。
+
 ## なぜ system libvirt か
 
 Script は、通常 `virt-manager` に表示されるのと同じ `qemu:///system` 接続を使います。

@@ -14,7 +14,7 @@ KVM/libvirt と `virt-manager` だけです。Codex、Claude Code、OpenCode、
 Aider、Ollama、プロジェクトのコマンド、および第三者インストーラーは
 VM 内で動きます。
 
-現在のリポジトリでは、プロビジョニング用スクリプトは一つだけです。
+現在のリポジトリでは、setup と recovery のコマンドは一つだけです。
 
 ```bash
 ./setup-kvm-agent.sh
@@ -24,6 +24,18 @@ VM 内で動きます。
 VM を作り、最小 Ubuntu デスクトップと要求された五つのツールを導入して、
 完了まで待ちます。日常的な操作には使い慣れた `virt-manager` の GUI を
 使います。
+
+同じコマンドで、中断した finalization の再開や使い捨て VM の置換もできます。
+再作成せず削除だけを行う小さな helper も残しています。
+
+```bash
+./setup-kvm-agent.sh --finalize-existing --name kvm-agent
+./setup-kvm-agent.sh --replace-existing --name kvm-agent
+./remove-kvm-agent.sh
+```
+
+共有の検証済み Ubuntu image cache、host package、利用者が後から接続した
+追加 disk は削除しません。
 
 ## アーキテクチャ
 
@@ -166,15 +178,20 @@ ollama --version
 --allow-lan        private・link-local address range への外向き通信を許可する。
                    UFW は有効なままで、未要求の inbound 通信は引き続き拒否する。
                    社内ミラーやモデル endpoint が必要な場合のみ
+--replace-existing 指定した既存 VM を正確な名前の確認後に削除し、再作成する
+--finalize-existing
+                   既存 VM の検証済み最終 cleanup を再開する
 ```
 
-`--no-wait` はプロビジョニング完了前に戻るため、この経路ではゲストパスワードの
-hash を含む cloud-init seed が削除されず、将来の cloud-init 実行も無効化されません。
-provisioning marker が作られた後、guest 内で
-`sudo install -o root -g root -m 0644 /dev/null /etc/cloud/cloud-init.disabled`
-を実行してください。VM が落ち着いた後、
-virt-manager で seed を eject してから
-`/var/lib/libvirt/images/kvm-agent/vms/NAME-seed.img` を手動で削除してください。
+`--no-wait` は provisioning 完了前に戻るため、その時点では cloud-init seed の
+削除や将来の cloud-init 実行の無効化はできません。後で repository の helper を
+実行してください。Helper は provisioning 成功を待ち、必要な update reboot を行い、
+変更された DHCP address を再検出し、guest marker を検証してから cloud-init を
+無効化し、seed を削除します。
+
+```bash
+./setup-kvm-agent.sh --finalize-existing --name NAME
+```
 
 例:
 
@@ -186,8 +203,45 @@ virt-manager で seed を eject してから
   --disk 120
 ```
 
-VM 名には小文字英字、数字、ハイフンを使います。既存の libvirt domain や
-ディスクを置き換えることは拒否します。
+VM 名には小文字英字、数字、ハイフンを使います。既定では既存の libvirt
+domain や disk の置換を拒否します。`--replace-existing` は削除計画を表示し、
+VM 名の手入力を要求し、共有 Ubuntu cache と手動で追加した disk を残して
+から再作成します。
+
+## 中断した finalization を再開する
+
+Setup が update reboot 後に guest へ到達できなかったと報告しても、desktop と
+各 tool が動作する場合は、VM を作り直したり SSH・`virsh` の個別 cleanup command
+を手入力したりしないでください。次を実行します。
+
+```bash
+./setup-kvm-agent.sh --finalize-existing --name kvm-agent
+```
+
+Helper は reboot 前の address を信用せず、libvirt の DHCP lease を再取得します。
+Recovery key で `/var/lib/kvm-agent/provisioned` を確認するまで cloud-init や seed
+を変更せず、実行中・永続化済みの両 device configuration から管理対象 seed が
+外れたことを検証してから、その正確な seed file だけを削除します。
+`--no-wait` 後もこの helper が正式な完了手順です。
+
+## VM を完全に削除する
+
+Guest を通常どおり shutdown してから次を実行します。
+
+```bash
+./remove-kvm-agent.sh --name kvm-agent
+```
+
+Helper は削除前に、libvirt domain、接続済み storage、管理対象 image の正確な
+path、復旧 SSH directory、log を表示します。確認には VM の正確な名前を入力します。
+Domain、main disk、残っている cloud-init seed、host 側の復旧 data を削除します。
+検証済み Ubuntu base-image cache と仮想化 package は残すため、作り直す際に host
+導入や image download を繰り返す必要はありません。
+
+`--dry-run` で計画だけを確認できます。実行中 VM の削除は拒否します。まず通常どおり
+shutdown してください。`--force` は物理マシンの電源 cable を抜くのと同じ filesystem
+破損 risk を受け入れる場合だけ使います。利用者が追加した storage は表示しますが、
+自動削除しません。
 
 ## 日常的な利用
 
@@ -201,7 +255,7 @@ VM 名には小文字英字、数字、ハイフンを使います。既存の l
 2. この作業に必要なプロジェクトデータと失効可能な認証情報だけをゲストへ入れる。
 3. エージェントを実行し、commit または patch をレビューする。
 4. レビュー済み結果を外へ出す。
-5. VM の状態を信頼できなくなったら破棄または rollback する。
+5. VM の状態を信頼できなくなったら `remove-kvm-agent.sh` で破棄するか rollback する。
 
 snapshot、更新、復旧 SSH、データ移動については
 [日常運用](docs/daily-use_jp.md)を参照してください。

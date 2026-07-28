@@ -62,6 +62,12 @@ the creation process scriptable. After successful provisioning and any required
 first reboot, the host disables future cloud-init runs in that guest, detaches
 the NoCloud seed, and removes the seed file.
 
+The post-reboot wait re-queries libvirt DHCP leases because an address is not a
+stable VM identity. If host-side waiting is interrupted,
+`setup-kvm-agent.sh --finalize-existing` invokes the same internal marker
+verification, cloud-init disabling, and fail-closed seed detachment without
+recreating the working VM.
+
 ## Why system libvirt
 
 The script uses `qemu:///system`, the same connection normally shown by

@@ -14,6 +14,8 @@ readonly GUEST_ARCH="amd64"
 readonly LIBVIRT_URI="qemu:///system"
 readonly LIBVIRT_NETWORK="default"
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly IMAGE_DIR="/var/lib/libvirt/images/kvm-agent"
+readonly VM_IMAGE_DIR="${IMAGE_DIR}/vms"
 
 VM_NAME="kvm-agent"
 GUEST_USER="agent"
@@ -78,6 +80,172 @@ warn() {
 die() {
   printf 'Error: %s\n' "$*" >&2
   exit 1
+}
+
+guest_ipv4_addresses() {
+  LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" \
+    domifaddr "$VM_NAME" --source lease 2>/dev/null \
+    | awk '
+        $3 == "ipv4" {
+          split($4, address, "/")
+          if (!seen[address[1]]++) print address[1]
+        }
+      '
+}
+
+# Set GUEST_IP to a current address that belongs to this domain and accepts the
+# repository recovery key. Re-query every iteration because DHCP may assign a
+# different address after reboot.
+wait_for_guest_ssh() {
+  local attempts="$1"
+  local remote_check="${2:-true}"
+  local candidate
+
+  for _ in $(seq 1 "$attempts"); do
+    while IFS= read -r candidate; do
+      [[ -n "$candidate" ]] || continue
+      if ssh "${ssh_options[@]}" "${GUEST_USER}@${candidate}" \
+          "$remote_check" >/dev/null 2>&1; then
+        GUEST_IP="$candidate"
+        return 0
+      fi
+    done < <(guest_ipv4_addresses)
+    sleep 5
+  done
+  return 1
+}
+
+# Complete the same verified, fail-closed finalization for both a fresh setup
+# and --finalize-existing. Nothing is detached or deleted until the recovery
+# key reaches this named domain and the guest provisioning marker is present.
+finalize_managed_guest() {
+  local managed_seed_image="${VM_IMAGE_DIR}/${VM_NAME}-seed.img"
+  local live_blocks
+  local config_blocks
+  local seed_targets
+  local seed_target
+
+  [[ -r "$SSH_PRIVATE_KEY" ]] || die \
+    "Recovery SSH key not found: $SSH_PRIVATE_KEY"
+  sudo virsh --connect "$LIBVIRT_URI" dominfo "$VM_NAME" >/dev/null 2>&1 || die \
+    "No libvirt VM named '$VM_NAME' exists."
+
+  ssh_options=(
+    -o BatchMode=yes
+    -o ConnectTimeout=5
+    -o ForwardAgent=no
+    -o IdentitiesOnly=yes
+    -o StrictHostKeyChecking=accept-new
+    -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS}"
+    -i "$SSH_PRIVATE_KEY"
+  )
+
+  log "Waiting for recovery SSH and successful guest provisioning"
+  GUEST_IP=""
+  if ! wait_for_guest_ssh 240 \
+      "sudo cloud-init status --wait && sudo test -f /var/lib/kvm-agent/provisioned"; then
+    warn "Could not verify successful provisioning within 20 minutes."
+    # A reachable guest may still contain useful failure diagnostics.
+    if wait_for_guest_ssh 1 true; then
+      ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
+        "sudo cloud-init status --long || true; sudo tail -n 160 /var/log/kvm-agent-provision.log || true" \
+        >&2 || true
+    fi
+    die "Finalization stopped without changing cloud-init or deleting the seed."
+  fi
+
+  if ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
+      "test -e /var/run/reboot-required"; then
+    log "Rebooting once to activate guest kernel and desktop updates"
+    ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
+      "sudo systemctl reboot" >/dev/null 2>&1 || true
+
+    # The guest may return with a different lease. Successful SSH plus the
+    # provisioning marker is the meaningful post-reboot condition.
+    GUEST_IP=""
+    if ! wait_for_guest_ssh 180 \
+        "sudo test -f /var/lib/kvm-agent/provisioned"; then
+      die "The guest did not become reachable after its update reboot. Finalization stopped before cleanup."
+    fi
+  fi
+
+  log "Disabling future cloud-init runs in the guest"
+  ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
+    "sudo install -o root -g root -m 0644 /dev/null /etc/cloud/cloud-init.disabled"
+  ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
+    "sudo test -f /etc/cloud/cloud-init.disabled" || die \
+    "Could not verify the cloud-init disable marker; the seed was retained."
+
+  log "Detaching and destroying the cloud-init seed"
+  live_blocks="$(
+    LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" \
+      domblklist "$VM_NAME" --details
+  )" || die \
+    "Could not inspect the current block-device configuration; the seed was retained."
+  config_blocks="$(
+    LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" \
+      domblklist "$VM_NAME" --inactive --details
+  )" || die \
+    "Could not inspect the persistent block-device configuration; the seed was retained."
+
+  seed_targets="$(
+    printf '%s\n%s\n' "$live_blocks" "$config_blocks" \
+      | awk -v source="$managed_seed_image" \
+          '$4 == source { print $3 }' \
+      | sort -u
+  )"
+
+  if [[ -n "$seed_targets" ]]; then
+    while IFS= read -r seed_target; do
+      [[ -n "$seed_target" ]] || continue
+      if ! sudo virsh --connect "$LIBVIRT_URI" change-media "$VM_NAME" \
+          "$seed_target" --eject --live --config --force >/dev/null 2>&1; then
+        sudo virsh --connect "$LIBVIRT_URI" change-media "$VM_NAME" \
+          "$seed_target" --eject --config --force >/dev/null 2>&1 || die \
+          "Could not detach seed target '$seed_target'; the seed file was retained."
+      fi
+    done <<< "$seed_targets"
+  fi
+
+  # Query failures are fatal. They must never be interpreted as proof that the
+  # seed is detached.
+  live_blocks="$(
+    LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" \
+      domblklist "$VM_NAME" --details
+  )" || die \
+    "Could not verify the current block-device configuration; the seed was retained."
+  config_blocks="$(
+    LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" \
+      domblklist "$VM_NAME" --inactive --details
+  )" || die \
+    "Could not verify the persistent block-device configuration; the seed was retained."
+
+  if grep -Fq -- "$managed_seed_image" <<< "$live_blocks" \
+      || grep -Fq -- "$managed_seed_image" <<< "$config_blocks"; then
+    die "The seed is still attached; its file was retained."
+  fi
+
+  if sudo test -e "$managed_seed_image" \
+      || sudo test -L "$managed_seed_image"; then
+    # Best-effort overwrite before deletion. This is not guaranteed secure
+    # erase on SSD, copy-on-write, or layered storage.
+    sudo shred --remove --zero -- "$managed_seed_image" 2>/dev/null \
+      || sudo rm -f -- "$managed_seed_image"
+  fi
+  if sudo test -e "$managed_seed_image" \
+      || sudo test -L "$managed_seed_image"; then
+    die "The seed file still exists after attempted removal: $managed_seed_image"
+  fi
+
+  # Prevent the EXIT trap from treating a successfully removed seed as a
+  # partial artifact during a fresh setup.
+  if [[ "$SEED_IMAGE" == "$managed_seed_image" ]]; then
+    SEED_IMAGE=""
+  fi
+
+  log "Installed guest tool versions"
+  ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
+    "sudo cat /var/lib/kvm-agent/installed-versions.txt"
 }
 
 # Report "present", "absent", or "unknown" for the target domain. "unknown"
@@ -227,9 +395,21 @@ HOST_USER_HOME="$(getent passwd "$HOST_USER" | awk -F: '{print $6}')"
     && -d "$HOST_USER_HOME" ]] || die \
   "Cannot resolve a usable home directory for host account '$HOST_USER'."
 
+readonly KEY_DIR="${HOST_USER_HOME}/.local/share/kvm-agent/${VM_NAME}"
+readonly SSH_PRIVATE_KEY="${KEY_DIR}/id_ed25519"
+readonly SSH_PUBLIC_KEY_FILE="${SSH_PRIVATE_KEY}.pub"
+readonly SSH_KNOWN_HOSTS="${KEY_DIR}/known_hosts"
+ssh_options=()
+GUEST_IP=""
+
 if [[ "$OPERATION" == "finalize" ]]; then
-  exec "${SCRIPT_DIR}/finalize-kvm-agent.sh" \
-    --name "$VM_NAME" --user "$GUEST_USER"
+  log "Authorising finalization"
+  sudo -v
+  finalize_managed_guest
+  log "KVM-Agent finalization completed"
+  printf 'Guest address: %s\n' "$GUEST_IP"
+  printf 'Cloud-init is disabled and the provisioning seed is absent.\n'
+  exit 0
 fi
 
 HOST_RAM_MB="$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)"
@@ -369,8 +549,6 @@ fi
 
 readonly IMAGE_NAME="ubuntu-${GUEST_RELEASE}-server-cloudimg-${GUEST_ARCH}.img"
 readonly IMAGE_BASE_URL="https://cloud-images.ubuntu.com/releases/${GUEST_RELEASE}/release"
-readonly IMAGE_DIR="/var/lib/libvirt/images/kvm-agent"
-readonly VM_IMAGE_DIR="${IMAGE_DIR}/vms"
 readonly BASE_IMAGE="${IMAGE_DIR}/${IMAGE_NAME}"
 readonly BASE_CHECKSUM="${BASE_IMAGE}.sha256"
 readonly UBUNTU_CLOUD_KEYRING="/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg"
@@ -425,11 +603,6 @@ if [[ "$base_image_valid" != "yes" ]]; then
 else
   log "Reusing the locally verified Ubuntu base image"
 fi
-
-readonly KEY_DIR="${HOST_USER_HOME}/.local/share/kvm-agent/${VM_NAME}"
-readonly SSH_PRIVATE_KEY="${KEY_DIR}/id_ed25519"
-readonly SSH_PUBLIC_KEY_FILE="${SSH_PRIVATE_KEY}.pub"
-readonly SSH_KNOWN_HOSTS="${KEY_DIR}/known_hosts"
 
 install -d -m 0700 "$KEY_DIR"
 if [[ -e "$SSH_PRIVATE_KEY" || -e "$SSH_PUBLIC_KEY_FILE" ]]; then
@@ -838,156 +1011,9 @@ if [[ "$WAIT_FOR_GUEST" != "yes" ]]; then
   exit 0
 fi
 
-log "Waiting for the VM to obtain an address"
-GUEST_IP=""
-for _ in $(seq 1 240); do
-  GUEST_IP="$(
-    LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" \
-      domifaddr "$VM_NAME" --source lease 2>/dev/null \
-      | awk '$3 == "ipv4" { split($4, address, "/"); print address[1]; exit }'
-  )"
-  [[ -z "$GUEST_IP" ]] || break
-  sleep 5
-done
-
-if [[ -z "$GUEST_IP" ]]; then
-  print_next_steps
-  die "The VM did not report a DHCP address within 20 minutes. See docs/troubleshooting.md."
-fi
-
-ssh_options=(
-  -o BatchMode=yes
-  -o ConnectTimeout=5
-  -o ForwardAgent=no
-  -o IdentitiesOnly=yes
-  -o StrictHostKeyChecking=accept-new
-  -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS}"
-  -i "$SSH_PRIVATE_KEY"
-)
-
-log "Waiting for recovery SSH while the graphical guest boots"
-ssh_ready="no"
-for _ in $(seq 1 180); do
-  if ssh "${ssh_options[@]}" \
-      "${GUEST_USER}@${GUEST_IP}" true >/dev/null 2>&1; then
-    ssh_ready="yes"
-    break
-  fi
-  sleep 5
-done
-[[ "$ssh_ready" == "yes" ]] || {
-  print_next_steps "$GUEST_IP"
-  die "Recovery SSH did not become ready within 15 minutes."
-}
-
 log "Waiting for desktop and agent-tool provisioning to finish"
 printf 'This commonly takes 20-60 minutes and may take longer on a slow host.\n'
-if ! ssh "${ssh_options[@]}" \
-    -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
-    "${GUEST_USER}@${GUEST_IP}" \
-    "sudo cloud-init status --wait && sudo test -f /var/lib/kvm-agent/provisioned"; then
-  warn "Guest provisioning failed. The final guest log follows."
-  ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
-    "sudo cloud-init status --long || true; sudo tail -n 160 /var/log/kvm-agent-provision.log || true" \
-    >&2 || true
-  print_next_steps "$GUEST_IP"
-  die "Guest provisioning did not complete successfully."
-fi
-
-if ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
-    "test -e /var/run/reboot-required"; then
-  log "Rebooting once to activate guest kernel and desktop updates"
-  ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
-    "sudo systemctl reboot" >/dev/null 2>&1 || true
-
-  reboot_started="no"
-  for _ in $(seq 1 60); do
-    if ! ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
-        true >/dev/null 2>&1; then
-      reboot_started="yes"
-      break
-    fi
-    sleep 2
-  done
-  [[ "$reboot_started" == "yes" ]] || warn \
-    "The guest did not become unreachable; verify whether its reboot occurred."
-
-  ssh_ready="no"
-  for _ in $(seq 1 180); do
-    # DHCP may assign a new address after reboot. Re-query every iteration and
-    # accept only an address that both belongs to this domain and answers with
-    # the repository recovery key plus the successful-provisioning marker.
-    while IFS= read -r candidate_ip; do
-      [[ -n "$candidate_ip" ]] || continue
-      if ssh "${ssh_options[@]}" "${GUEST_USER}@${candidate_ip}" \
-          "test -f /var/lib/kvm-agent/provisioned" >/dev/null 2>&1; then
-        GUEST_IP="$candidate_ip"
-        ssh_ready="yes"
-        break 2
-      fi
-    done < <(
-      LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" \
-        domifaddr "$VM_NAME" --source lease 2>/dev/null \
-        | awk '
-            $3 == "ipv4" {
-              split($4, address, "/")
-              if (!seen[address[1]]++) print address[1]
-            }
-          '
-    )
-    sleep 5
-  done
-  [[ "$ssh_ready" == "yes" ]] || {
-    print_next_steps
-    printf 'Resume verified finalization later with:\n' >&2
-    printf '  %q --finalize-existing --name %q --user %q\n' \
-      "${SCRIPT_DIR}/setup-kvm-agent.sh" "$VM_NAME" "$GUEST_USER" >&2
-    die "The guest did not become reachable after its first update reboot; no final cleanup was attempted."
-  }
-fi
-
-# Provisioning is complete and any first update reboot has succeeded. Disable
-# future cloud-init runs before removing its seed, so this VM becomes an
-# ordinary local desktop guest after bootstrap.
-log "Disabling future cloud-init runs in the guest"
-ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
-  "sudo install -o root -g root -m 0644 /dev/null /etc/cloud/cloud-init.disabled"
-
-# The seed has done its job. It contains the guest password hash and is of no
-# further use, so it is detached from the domain and destroyed rather than left
-# attached as a CD-ROM for the life of the VM.
-log "Detaching and destroying the cloud-init seed"
-seed_target="$(
-  LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" \
-    domblklist "$VM_NAME" --details 2>/dev/null \
-    | awk -v source="$SEED_IMAGE" '$4 == source { print $3; exit }'
-)"
-
-if [[ -z "$seed_target" ]]; then
-  warn "Could not find the seed device on '$VM_NAME'; leaving $SEED_IMAGE in place."
-else
-  seed_detached="no"
-  if sudo virsh --connect "$LIBVIRT_URI" change-media "$VM_NAME" \
-      "$seed_target" --eject --live --config --force >/dev/null 2>&1; then
-    seed_detached="yes"
-  elif sudo virsh --connect "$LIBVIRT_URI" change-media "$VM_NAME" \
-      "$seed_target" --eject --config --force >/dev/null 2>&1; then
-    seed_detached="yes"
-    warn "The seed was detached from the saved configuration only; it is released at the next shutdown."
-  fi
-
-  if [[ "$seed_detached" == "yes" ]]; then
-    sudo shred --remove --zero -- "$SEED_IMAGE" 2>/dev/null \
-      || sudo rm -f -- "$SEED_IMAGE"
-    SEED_IMAGE=""
-  else
-    warn "Could not eject the seed device; $SEED_IMAGE still holds the guest password hash."
-  fi
-fi
-
-log "Installed guest tool versions"
-ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
-  "sudo cat /var/lib/kvm-agent/installed-versions.txt"
+finalize_managed_guest
 
 log "KVM-Agent setup completed"
 print_next_steps "$GUEST_IP"

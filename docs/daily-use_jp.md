@@ -199,6 +199,14 @@ property を確認してください。
 5. Guest credential を失効または rotate する。
 6. 有用な trust boundary でなくなれば VM を rollback または削除する。
 
-`virt-manager` で VM を削除する際、storage checkbox を選んだ場合だけ storage も
-削除されます。削除前に正確な qcow2 path を慎重に確認してください。削除は安全な
+KVM-Agent guest と repository が管理する host 側 state をまとめて削除するには、
+guest を shutdown し、repository から次を実行します。
+
+```bash
+./remove-kvm-agent.sh --name kvm-agent
+```
+
+必要なら先に `--dry-run` を使います。Helper が削除するのは、正確な管理対象 disk、
+残存 seed、復旧 directory、現在の libvirt log、指定 domain だけです。共有 Ubuntu
+image cache、host package、利用者が追加接続した storage は残します。削除は安全な
 消去を保証しません。[SECURITY_jp.md](../SECURITY_jp.md)を参照してください。

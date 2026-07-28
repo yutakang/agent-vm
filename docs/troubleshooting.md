@@ -134,8 +134,17 @@ sudo virsh --connect qemu:///system dominfo kvm-agent
 sudo virsh --connect qemu:///system domblklist kvm-agent --details
 ```
 
-Prefer deleting the confirmed VM and selected storage through `virt-manager`.
-Do not copy a generic recursive deletion command from a bug report.
+If it is confirmed to be a failed KVM-Agent guest, shut it down and inspect the
+repository cleanup plan:
+
+```bash
+./remove-kvm-agent.sh --name kvm-agent --dry-run
+./remove-kvm-agent.sh --name kvm-agent
+```
+
+The helper removes the exact managed disk, leftover seed, recovery data, log,
+and domain while retaining shared caches and manually attached extra disks. Do
+not copy a generic recursive deletion command from a bug report.
 
 ## The script cannot find a VM address
 
@@ -355,19 +364,17 @@ sudo test -f /etc/cloud/cloud-init.disabled
 sudo tail -n 160 /var/log/kvm-agent-provision.log
 ```
 
-With `--no-wait`, create the disable marker yourself only after the provisioning
-marker exists, then eject and remove the seed.
-
-Confirm which device holds it, eject it, then remove the file:
+With `--no-wait`, or after a post-reboot host-side timeout, resume through the
+setup command rather than performing the individual SSH and `virsh` operations:
 
 ```bash
-sudo virsh --connect qemu:///system domblklist NAME --details
-sudo virsh --connect qemu:///system change-media NAME sda --eject --live --config --force
-sudo shred --remove --zero /var/lib/libvirt/images/kvm-agent/vms/NAME-seed.img
+./setup-kvm-agent.sh --finalize-existing --name NAME
 ```
 
-Ejecting only from the saved configuration is fine; the running domain releases
-the file at its next shutdown.
+It re-discovers the address after reboot, verifies successful provisioning,
+creates and verifies the disable marker, detaches the exact seed from both the
+live and persistent configurations, and only then removes the file. If any
+inspection or verification fails, it retains the seed and reports an error.
 
 `shred` here means "remove, and attempt to overwrite first". On SSDs,
 copy-on-write filesystems, and layered storage it cannot guarantee the old

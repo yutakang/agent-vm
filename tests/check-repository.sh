@@ -5,6 +5,7 @@ umask 077
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 SETUP_SCRIPT="${REPO_DIR}/setup-kvm-agent.sh"
+REMOVE_SCRIPT="${REPO_DIR}/remove-kvm-agent.sh"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -14,10 +15,16 @@ fail() {
 bash -n "$SETUP_SCRIPT"
 "$SETUP_SCRIPT" --help >/dev/null
 [[ -x "$SETUP_SCRIPT" ]] || fail "setup-kvm-agent.sh is not executable"
+bash -n "$REMOVE_SCRIPT"
+"$REMOVE_SCRIPT" --help >/dev/null
+[[ -x "$REMOVE_SCRIPT" ]] || fail "remove-kvm-agent.sh is not executable"
 if ((EUID == 0)); then
   root_output="$("$SETUP_SCRIPT" --name root-guard-test 2>&1 || true)"
   grep -Fq "not as root" <<< "$root_output" || fail \
     "setup script did not reject direct root execution"
+  remove_root_output="$("$REMOVE_SCRIPT" --name root-guard-test --dry-run 2>&1 || true)"
+  grep -Fq "not as root" <<< "$remove_root_output" || fail \
+    "remove script did not reject direct root execution"
 fi
 
 TEMP_DIR="$(mktemp -d)"
@@ -101,6 +108,9 @@ for required_text in \
     "ufw default deny incoming" \
     "ufw --force enable" \
     "/etc/cloud/cloud-init.disabled" \
+    "--finalize-existing" \
+    "--replace-existing" \
+    'remove-kvm-agent.sh" \' \
     "usermod -aG libvirt --"; do
   grep -Fq -- "$required_text" "$SETUP_SCRIPT" \
     || fail "setup script is missing: $required_text"
@@ -114,6 +124,27 @@ for forbidden_text in \
   grep -Fq -- "$forbidden_text" "$SETUP_SCRIPT" \
     && fail "setup script still contains: $forbidden_text"
 done
+
+for required_text in \
+    "/var/lib/kvm-agent/provisioned" \
+    "/etc/cloud/cloud-init.disabled" \
+    "domifaddr" \
+    "domblklist" \
+    "--inactive --details" \
+    "change-media" \
+    "shred --remove --zero"; do
+  grep -Fq -- "$required_text" "$SETUP_SCRIPT" \
+    || fail "integrated finalization is missing: $required_text"
+done
+
+[[ ! -e "${REPO_DIR}/finalize-kvm-agent.sh" ]] || fail \
+  "obsolete standalone finalize-kvm-agent.sh still exists"
+[[ ! -e "${SCRIPT_DIR}/mock-finalize.sh" ]] || fail \
+  "obsolete standalone finalization test still exists"
+if rg -n --glob '*.md' --glob '*.sh' --glob '!check-repository.sh' \
+    'finalize-kvm-agent\.sh' "$REPO_DIR" >/dev/null; then
+  fail "repository still refers to finalize-kvm-agent.sh"
+fi
 
 [[ ! -d "${REPO_DIR}/formal-methods" ]] || fail \
   "obsolete formal-methods directory still exists"
@@ -150,5 +181,6 @@ if missing:
 PY
 
 "${SCRIPT_DIR}/mock-setup.sh"
+"${SCRIPT_DIR}/mock-remove.sh"
 
 echo "Repository checks passed."

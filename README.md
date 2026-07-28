@@ -13,7 +13,7 @@ agents. The host runs only Ubuntu's KVM/libvirt stack and `virt-manager`; Codex,
 Claude Code, OpenCode, Aider, Ollama, project commands, and their third-party
 installers run inside the VM.
 
-The repository now has one provisioning script:
+The repository has one setup and recovery command:
 
 ```bash
 ./setup-kvm-agent.sh
@@ -23,6 +23,19 @@ The script installs the host virtualization stack, authenticates an official
 Ubuntu cloud image, creates the VM, installs a minimal Ubuntu desktop, installs
 the five requested tools, and waits for the result. Day-to-day operation happens
 through the familiar `virt-manager` GUI.
+
+The same command can resume interrupted finalization or replace a disposable
+VM. A small removal helper remains available when removal without rebuilding
+is wanted:
+
+```bash
+./setup-kvm-agent.sh --finalize-existing --name kvm-agent
+./setup-kvm-agent.sh --replace-existing --name kvm-agent
+./remove-kvm-agent.sh
+```
+
+It does not remove the shared verified Ubuntu image cache, host packages, or
+additional disks that a user attached manually.
 
 ## Architecture
 
@@ -163,15 +176,21 @@ Do that only after reading [Credential handling](docs/credentials.md).
 --allow-lan        Permit egress to private/link-local address ranges; UFW
                    remains enabled and continues to deny unsolicited inbound
                    traffic. Only for an internal mirror or model endpoint
+--replace-existing Remove the selected existing VM after exact-name
+                   confirmation, then build it again
+--finalize-existing
+                   Resume verified final cleanup of an existing VM
 ```
 
-`--no-wait` returns before provisioning finishes, so the cloud-init seed — which
-holds the guest password hash — is not cleaned up and future cloud-init runs are
-not disabled on that path. After the provisioning marker appears, run
-`sudo install -o root -g root -m 0644 /dev/null /etc/cloud/cloud-init.disabled`
-inside the guest. Then remove
-`/var/lib/libvirt/images/kvm-agent/vms/NAME-seed.img` yourself, after ejecting
-it in virt-manager, once the VM has settled.
+`--no-wait` returns before provisioning finishes, so it cannot immediately
+remove the cloud-init seed or disable future cloud-init runs. Complete those
+steps later with the repository helper; it waits for successful provisioning,
+performs a required update reboot, rediscovers a changed DHCP address, verifies
+the guest marker, disables cloud-init, and removes the seed:
+
+```bash
+./setup-kvm-agent.sh --finalize-existing --name NAME
+```
 
 For example:
 
@@ -183,8 +202,46 @@ For example:
   --disk 120
 ```
 
-VM names use lowercase letters, numbers, and hyphens. The script refuses to
-replace an existing libvirt domain or disk.
+VM names use lowercase letters, numbers, and hyphens. By default, the script
+refuses to replace an existing libvirt domain or disk. `--replace-existing`
+shows the exact removal plan, requires the VM name to be typed, retains the
+shared Ubuntu cache and any manually attached extra disks, then rebuilds.
+
+## Resume interrupted finalization
+
+If setup reports that the guest did not become reachable after its update
+reboot, but the desktop and tools work, do not recreate the VM and do not type
+the individual SSH and `virsh` cleanup commands. Run:
+
+```bash
+./setup-kvm-agent.sh --finalize-existing --name kvm-agent
+```
+
+The helper re-queries libvirt DHCP leases instead of trusting the pre-reboot
+address. It verifies `/var/lib/kvm-agent/provisioned` through the recovery key
+before changing cloud-init or touching the seed, and verifies both the running
+and persistent device configurations before deleting the exact managed seed
+file. It is also the supported completion path after `--no-wait`.
+
+## Completely remove a VM
+
+Shut the guest down normally, then run:
+
+```bash
+./remove-kvm-agent.sh --name kvm-agent
+```
+
+The helper displays the libvirt domain, attached storage, exact managed image
+paths, recovery SSH directory, and log it will remove. Type the exact VM name
+to confirm. It removes the domain, its main disk, any leftover cloud-init seed,
+and its host-side recovery data. It retains the verified Ubuntu base-image
+cache and virtualization packages, so a later rebuild does not repeat the
+host installation or image download.
+
+Use `--dry-run` to inspect the plan. The helper refuses to remove a running VM;
+shut it down first, or use `--force` only when accepting the same filesystem
+corruption risk as pulling a physical machine's power cable. Extra storage
+attached manually is reported but never deleted automatically.
 
 ## Daily use
 
@@ -199,7 +256,8 @@ A good working cycle is:
    in the guest;
 3. run the agent and review its commits or patch;
 4. export the reviewed result; and
-5. discard or roll back the VM when its state is no longer trusted.
+5. discard with `remove-kvm-agent.sh`, or roll back the VM, when its state is
+   no longer trusted.
 
 See [Daily operation](docs/daily-use.md) for snapshots, updates, SSH recovery,
 and data transfer.

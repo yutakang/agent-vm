@@ -33,6 +33,20 @@ MemTotal:       33554432 kB
 EOF
 
 cp "$REPO_DIR/setup-kvm-agent.sh" "$TEMP_DIR/setup-under-test.sh"
+cat > "$TEMP_DIR/remove-kvm-agent.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$MOCK_STATE/remove-arguments"
+rm -f -- \
+  "$MOCK_STATE/domain-defined" \
+  "$MOCK_STATE/rebooted" \
+  "$MOCK_STATE/seed-ejected" \
+  "$MOCK_STATE/cloud-init-disabled" \
+  "$MOCK_STATE/provisioning-failed" \
+  "$MOCK_IMAGES/vms/mock-agent.qcow2" \
+  "$MOCK_IMAGES/vms/mock-agent-seed.img"
+rm -rf -- "$MOCK_HOME/.local/share/kvm-agent/mock-agent"
+EOF
+chmod 0755 "$TEMP_DIR/remove-kvm-agent.sh"
 # The single-quoted sed expression must match the literal shell variable name.
 # shellcheck disable=SC2016
 sed -i \
@@ -118,12 +132,21 @@ OUTPUT
     fi
     ;;
   domblklist)
-    cat <<OUTPUT
+    if [[ -f "$MOCK_STATE/seed-ejected" ]]; then
+      cat <<OUTPUT
+ Type       Device     Target     Source
+--------------------------------------------------------
+ file       disk       vda        $MOCK_IMAGES/vms/mock-agent.qcow2
+ file       cdrom      sda
+OUTPUT
+    else
+      cat <<OUTPUT
  Type       Device     Target     Source
 --------------------------------------------------------
  file       disk       vda        $MOCK_IMAGES/vms/mock-agent.qcow2
  file       cdrom      sda        $MOCK_IMAGES/vms/mock-agent-seed.img
 OUTPUT
+    fi
     ;;
   change-media)
     touch "$MOCK_STATE/seed-ejected"
@@ -132,10 +155,15 @@ OUTPUT
     [[ -f "$MOCK_STATE/domain-defined" ]]
     ;;
   domifaddr)
-    cat <<'OUTPUT'
+    if [[ -f "$MOCK_STATE/rebooted" ]]; then
+      address="192.168.122.51"
+    else
+      address="192.168.122.50"
+    fi
+    cat <<OUTPUT
  Name       MAC address          Protocol     Address
 -------------------------------------------------------------------------------
- vnet0      52:54:00:00:00:01    ipv4        192.168.122.50/24
+ vnet0      52:54:00:00:00:01    ipv4        ${address}/24
 OUTPUT
     ;;
   *)
@@ -163,7 +191,20 @@ EOF
 cat > "$TEMP_DIR/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 all_arguments="$*"
+if [[ "$all_arguments" == *"cloud-init status --wait"* \
+    && -f "$MOCK_STATE/provisioning-failed" ]]; then
+  exit 1
+fi
 if [[ "$all_arguments" == *"test -e /var/run/reboot-required"* ]]; then
+  [[ -f "$MOCK_STATE/rebooted" ]] && exit 1
+  exit 0
+fi
+if [[ "$all_arguments" == *"sudo systemctl reboot"* ]]; then
+  touch "$MOCK_STATE/rebooted"
+  exit 0
+fi
+if [[ -f "$MOCK_STATE/rebooted" \
+    && "$all_arguments" == *"@192.168.122.50"* ]]; then
   exit 1
 fi
 if [[ "$all_arguments" == *"/etc/cloud/cloud-init.disabled"* ]]; then
@@ -230,6 +271,7 @@ chmod 0755 "$TEMP_DIR/bin/"*
 
 export MOCK_STATE="$TEMP_DIR/state"
 export MOCK_IMAGES="$TEMP_DIR/images"
+export MOCK_HOME="$TEMP_DIR/home"
 MOCK_PATH="$TEMP_DIR/bin:$PATH"
 
 printf 'mockpass123\nmockpass123\n' \
@@ -241,11 +283,55 @@ printf 'mockpass123\nmockpass123\n' \
 grep -Fq "KVM-Agent setup completed" "$TEMP_DIR/output"
 grep -Fq "codex-cli mock" "$TEMP_DIR/output"
 grep -Fq "virt-manager --connect qemu:///system" "$TEMP_DIR/output"
+grep -Fq "192.168.122.51" "$TEMP_DIR/output"
 [[ -f "$MOCK_STATE/domain-defined" ]]
+[[ -f "$MOCK_STATE/rebooted" ]]
 [[ -f "$TEMP_DIR/images/vms/mock-agent.qcow2" ]]
 [[ -f "$MOCK_STATE/seed-ejected" ]]
 [[ -f "$MOCK_STATE/cloud-init-disabled" ]]
 [[ ! -e "$TEMP_DIR/images/vms/mock-agent-seed.img" ]]
 [[ -f "$TEMP_DIR/home/.local/share/kvm-agent/mock-agent/id_ed25519" ]]
+
+env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
+  "$TEMP_DIR/setup-under-test.sh" \
+    --finalize-existing --name mock-agent --user agent \
+    > "$TEMP_DIR/finalize-output"
+grep -Fq "KVM-Agent finalization completed" \
+  "$TEMP_DIR/finalize-output"
+grep -Fq "192.168.122.51" "$TEMP_DIR/finalize-output"
+
+# If successful provisioning cannot be verified, recovery must not disable
+# cloud-init or detach/delete the seed. Shorten the retry loop in this mock.
+rm -f -- \
+  "$MOCK_STATE/cloud-init-disabled" \
+  "$MOCK_STATE/seed-ejected"
+touch \
+  "$MOCK_STATE/provisioning-failed" \
+  "$TEMP_DIR/images/vms/mock-agent-seed.img"
+sed -i 's/wait_for_guest_ssh 240/wait_for_guest_ssh 1/' \
+  "$TEMP_DIR/setup-under-test.sh"
+if env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
+    "$TEMP_DIR/setup-under-test.sh" \
+      --finalize-existing --name mock-agent --user agent \
+      > "$TEMP_DIR/finalize-failure-output" 2>&1; then
+  echo "Finalization unexpectedly accepted an unverified guest." >&2
+  exit 1
+fi
+grep -Fq "stopped without changing cloud-init" \
+  "$TEMP_DIR/finalize-failure-output"
+[[ ! -f "$MOCK_STATE/cloud-init-disabled" ]]
+[[ ! -f "$MOCK_STATE/seed-ejected" ]]
+[[ -f "$TEMP_DIR/images/vms/mock-agent-seed.img" ]]
+rm -f -- "$MOCK_STATE/provisioning-failed"
+
+printf 'mockpass123\nmockpass123\nmock-agent\n' \
+  | env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
+      "$TEMP_DIR/setup-under-test.sh" \
+        --replace-existing --name mock-agent \
+        --memory 8192 --vcpus 2 --disk 80 \
+        > "$TEMP_DIR/replace-output"
+grep -Fxq -- "--name mock-agent --force" \
+  "$MOCK_STATE/remove-arguments"
+grep -Fq "KVM-Agent setup completed" "$TEMP_DIR/replace-output"
 
 echo "Mocked setup workflow passed."

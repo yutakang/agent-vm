@@ -202,6 +202,15 @@ At the end of a task:
 5. revoke or rotate guest credentials; and
 6. roll back or delete the VM when it is no longer a useful trust boundary.
 
-Deleting a VM in `virt-manager` can remove its storage only when the storage
-checkbox is selected. Carefully confirm the exact qcow2 path before deletion.
-Deletion is not guaranteed secure erase; see [SECURITY.md](../SECURITY.md).
+To remove a KVM-Agent guest and all of its repository-managed host state, shut
+it down and run from the repository:
+
+```bash
+./remove-kvm-agent.sh --name kvm-agent
+```
+
+Use `--dry-run` first if desired. The helper removes only the exact managed
+disk, leftover seed, recovery directory, current libvirt log, and named domain.
+It retains the shared Ubuntu image cache, host packages, and any manually
+attached extra storage. Deletion is not guaranteed secure erase; see
+[SECURITY.md](../SECURITY.md).

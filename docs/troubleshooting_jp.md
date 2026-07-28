@@ -127,8 +127,17 @@ sudo virsh --connect qemu:///system dominfo kvm-agent
 sudo virsh --connect qemu:///system domblklist kvm-agent --details
 ```
 
-確認済み VM と選択 storage は `virt-manager` から削除するのが安全です。Bug report
-から generic recursive deletion command をコピーしないでください。
+失敗した KVM-Agent guest だと確認できたら shutdown し、repository の cleanup
+計画を確認します。
+
+```bash
+./remove-kvm-agent.sh --name kvm-agent --dry-run
+./remove-kvm-agent.sh --name kvm-agent
+```
+
+Helper は正確な管理対象 disk、残存 seed、復旧 data、log、domain を削除し、共有 cache
+と利用者が追加した disk は残します。Bug report から generic recursive deletion
+command をコピーしないでください。
 
 ## Script が VM address を見つけられない
 
@@ -332,19 +341,17 @@ sudo test -f /etc/cloud/cloud-init.disabled
 sudo tail -n 160 /var/log/kvm-agent-provision.log
 ```
 
-`--no-wait` を使った場合は、provisioning marker が存在することを確認した後にだけ
-disable marker を手動で作り、その後 seed を eject・削除してください。
-
-どの device が保持しているかを確認し、eject してから file を削除します。
+`--no-wait` を使った場合、または reboot 後の host 側待機が timeout した場合は、
+SSH・`virsh` の個別操作ではなく setup command から再開します。
 
 ```bash
-sudo virsh --connect qemu:///system domblklist NAME --details
-sudo virsh --connect qemu:///system change-media NAME sda --eject --live --config --force
-sudo shred --remove --zero /var/lib/libvirt/images/kvm-agent/vms/NAME-seed.img
+./setup-kvm-agent.sh --finalize-existing --name NAME
 ```
 
-保存された設定からのみ eject できた場合でも問題ありません。動作中の domain は次回
-shutdown 時に file を解放します。
+Helper は reboot 後の address を再検出し、provisioning 成功を検証し、disable
+marker を作成・確認します。その後、実行中・永続化済みの両 configuration から正確な
+seed を detach し、それを確認できた場合だけ file を削除します。検査や検証に
+失敗した場合は seed を残して error を報告します。
 
 ここでの `shred` は「削除し、その前に上書きを試みる」という意味です。SSD、
 copy-on-write filesystem、階層化された storage では、古い block が消えたことを保証
