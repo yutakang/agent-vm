@@ -348,6 +348,12 @@ Isabelle はこの Marketplace extension の一つではありません。`isabe
 provisioning が失敗した場合は log を保存し、credential-free guest を再作成します。
 部分導入 toolchain を成功 profile として扱わないでください。
 
+v12 で Isabelle の download 中に
+`curl: (23) Failure writing output to destination` が出る場合、120 GiB の root
+filesystem に余裕があっても、小さい RAM-backed `/run` に archive を一時保存
+していたことが原因になり得ます。現在の版は大きな download を root filesystem
+上へ保存し、失敗時には途中までの file も自動的に削除します。
+
 ## Ollama が使えない／広く公開された
 
 ```bash

@@ -260,6 +260,12 @@ Typical causes:
 - with `--formal-methods`, a Lean, GHCup, Cabal/HLint, VS Code, extension, or
   Isabelle download failure.
 
+`curl: (23) Failure writing output to destination` while downloading Isabelle
+in v12 can be caused by the archive being staged under the small RAM-backed
+`/run` filesystem, even when the 120 GiB root filesystem has ample space.
+Current versions stage large downloads on the root filesystem and remove
+partial files automatically.
+
 The script installs credentials only after none—it does not add any. If
 provisioning failed in an otherwise empty VM, the cleanest response is usually
 to preserve logs, delete that failed guest, correct the cause, and create a new

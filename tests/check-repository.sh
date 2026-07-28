@@ -134,6 +134,7 @@ for required_disk_safety in \
     "ensure_requested_root_capacity" \
     "Root filesystem is smaller than 90%" \
     "emergency-space.reserve" \
+    'staging_root="/var/lib/kvm-agent/install"' \
     "qemu-img info --output=json" \
     "json.load(sys.stdin)" \
     "minimum_host_free_gib=30"; do
@@ -155,12 +156,16 @@ done
 
 for forbidden_text in \
     "/tmp/kvm-agent-install-" \
+    "/run/kvm-agent-install" \
     "usermod -aG libvirt,kvm" \
     "ufw --force disable" \
     "listen=127.0.0.1"; do
   grep -Fq -- "$forbidden_text" "$SETUP_SCRIPT" \
     && fail "setup script still contains: $forbidden_text"
 done
+
+grep -Fq 'rm -rf -- "$staging_dir"' "$TEMP_DIR/guest-provision.sh" || fail \
+  "guest provisioning does not clean disk-backed staging"
 
 for required_text in \
     "/var/lib/kvm-agent/provisioned" \

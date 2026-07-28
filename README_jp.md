@@ -228,6 +228,10 @@ hlint --version
 最低 12 GiB、`--formal-methods` で最低 30 GiB の空きが必要であり、
 `--replace-existing` が旧 VM を削除する前に確認します。
 
+Isabelle 配布物を含む大きな installer と archive は、guest の root filesystem
+上にある保護された directory へ一時保存します。Ubuntu の RAM-backed `/run`
+には保存せず、失敗時には途中までの download も自動的に削除します。
+
 `--no-wait` は provisioning 完了前に戻るため、その時点では cloud-init seed の
 削除や将来の cloud-init 実行の無効化はできません。後で repository の helper を
 実行してください。Helper は provisioning 成功を待ち、必要な update reboot を行い、

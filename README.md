@@ -228,6 +228,11 @@ leaving the graphical login unusable. The host must have at least 12 GiB free
 for the base profile or 30 GiB for `--formal-methods`; setup checks this before
 `--replace-existing` removes the old VM.
 
+Large installers and archives, including the Isabelle distribution, are staged
+in a protected directory on the guest root filesystem. They are not stored in
+Ubuntu's RAM-backed `/run` filesystem, and partial downloads are removed
+automatically on failure.
+
 `--no-wait` returns before provisioning finishes, so it cannot immediately
 remove the cloud-init seed or disable future cloud-init runs. Complete those
 steps later with the repository helper; it waits for successful provisioning,

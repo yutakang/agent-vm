@@ -69,6 +69,11 @@ and checks the guest root filesystem before package installation. This check
 prevents a nominally 120 GiB qcow2 device from silently retaining the small
 root filesystem of the source cloud image.
 
+The Isabelle archive is downloaded to a protected staging directory on the
+guest root filesystem. Ubuntu mounts `/run` as a comparatively small
+RAM-backed filesystem, so it is deliberately not used for this 1+ GiB
+download. The staging directory is removed after installation or on failure.
+
 The host-side wait is bounded at six hours for this profile. If `--no-wait`
 was used or the terminal was interrupted, finish through the same setup
 command:

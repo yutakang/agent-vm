@@ -66,6 +66,11 @@ Local disk は thin provisioning です。Setup は既存の formal-methods VM �
 guest root filesystem を拡張・検証します。これにより、qcow2 device の公称容量だけが
 120 GiB になり、source cloud image の小さな root filesystem が残る失敗を防ぎます。
 
+Isabelle archive は guest の root filesystem 上にある保護された staging
+directory へ download します。Ubuntu の `/run` は比較的小さい RAM-backed
+filesystem なので、1 GiB を超えるこの download には使用しません。staging
+directory は導入完了時にも失敗時にも削除します。
+
 この profile の host-side wait 上限は 6 時間です。`--no-wait` を使った場合や
 terminal を中断した場合は、同じ setup command で完了させます。
 

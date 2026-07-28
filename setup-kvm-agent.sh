@@ -821,13 +821,19 @@ rm -f -- \
   /var/lib/kvm-agent/provisioned \
   /var/lib/kvm-agent/provisioning-failed
 emergency_reserve="/var/lib/kvm-agent/emergency-space.reserve"
+staging_root="/var/lib/kvm-agent/install"
+staging_dir=""
 record_provisioning_failure() {
   local exit_status=$?
   trap - EXIT
   if ((exit_status != 0)); then
     # Keep a failed provisioning run from leaving / completely full and
     # causing a graphical login loop. The reserve is allocated before large
-    # downloads and released first on failure.
+    # downloads. Remove any partial disk-backed download and release the
+    # reserve first on failure.
+    if [[ -n "$staging_dir" ]]; then
+      rm -rf -- "$staging_dir"
+    fi
     rm -f -- "$emergency_reserve"
     apt-get clean >/dev/null 2>&1 || true
     rm -rf -- /var/cache/apt/archives/partial/* 2>/dev/null || true
@@ -1103,14 +1109,14 @@ as_guest() {
       PATH="$guest_path" "$@"
 }
 
-# Installers are staged in a root-owned directory rather than under /tmp. The
-# directory is traversable but not writable by anyone except root, and each
-# staged file stays root-owned and read-only, so a predictable world-writable
-# path can never be pre-created as a symlink for a root-run "curl --output" to
-# follow, and the guest user cannot alter an installer between the download and
-# the moment it runs.
-install -d -o root -g root -m 0711 /run/kvm-agent-install
-staging_dir="$(mktemp -d /run/kvm-agent-install/stage.XXXXXXXX)"
+# Installers and large archives are staged on the root filesystem, not under
+# /run (a small RAM-backed tmpfs on Ubuntu) or a predictable world-writable
+# /tmp path. The directory is traversable but not writable by anyone except
+# root, and each staged file stays root-owned and read-only. This gives the
+# 1+ GiB Isabelle archive access to the verified VM disk capacity and prevents
+# the guest user from altering an installer before it runs.
+install -d -o root -g root -m 0711 "$staging_root"
+staging_dir="$(mktemp -d "${staging_root}/stage.XXXXXXXX")"
 chmod 0711 "$staging_dir"
 
 install_guest_script() {
@@ -1227,6 +1233,8 @@ chown root:root "$ollama_installer"
 chmod 0500 "$ollama_installer"
 bash "$ollama_installer"
 rm -f -- "$ollama_installer"
+rm -rf -- "$staging_dir"
+staging_dir=""
 
 install -d -o root -g root -m 0755 \
   /etc/systemd/system/ollama.service.d
