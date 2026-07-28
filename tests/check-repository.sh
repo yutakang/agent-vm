@@ -175,6 +175,7 @@ for required_text in \
     "domblklist" \
     "--inactive --details" \
     "change-media" \
+    "/proc/sys/kernel/random/boot_id" \
     "timeout --foreground" \
     "shred --remove --zero"; do
   grep -Fq -- "$required_text" "$SETUP_SCRIPT" \
@@ -188,6 +189,13 @@ done
 if grep -Fq -- "cloud-init status --wait" "$SETUP_SCRIPT"; then
   fail "setup script still contains an unbounded cloud-init wait"
 fi
+disable_line="$(grep -n -m1 'log "Disabling future cloud-init runs in the guest"' \
+  "$SETUP_SCRIPT" | cut -d: -f1)"
+reboot_line="$(grep -n -m1 'log "Rebooting once to activate guest kernel' \
+  "$SETUP_SCRIPT" | cut -d: -f1)"
+[[ -n "$disable_line" && -n "$reboot_line" \
+    && "$disable_line" -lt "$reboot_line" ]] || fail \
+  "cloud-init must be disabled and verified before an update reboot is requested"
 if rg -n --glob '*.md' --glob '*.sh' --glob '!check-repository.sh' \
     'finalize-kvm-agent\.sh' "$REPO_DIR" >/dev/null; then
   fail "repository still refers to finalize-kvm-agent.sh"

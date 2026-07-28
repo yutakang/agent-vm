@@ -415,9 +415,9 @@ private range への外向き通信を全般に許可する場合は `--allow-la
 含むため、setup script はプロビジョニング完了後に eject して shred します。`--no-wait`
 を使った場合、または eject に失敗して警告が出た場合には残ります。
 
-通常の完了待ち経路では、プロビジョニングと必要な初回 reboot が成功した後、
-`/etc/cloud/cloud-init.disabled` も作成します。これにより将来の cloud-init 実行を
-防ぐため、その後の status command は `disabled` と表示する場合があります。
+通常の完了待ち経路では、プロビジョニング成功後、必要な初回 reboot より前に
+`/etc/cloud/cloud-init.disabled` を作成・検証します。これにより将来の cloud-init
+実行を防ぐため、その後の status command は `disabled` と表示する場合があります。
 provisioning marker と log は残ります。
 
 ```bash
@@ -433,10 +433,11 @@ SSH・`virsh` の個別操作ではなく setup command から再開します。
 ./setup-kvm-agent.sh --finalize-existing --name NAME
 ```
 
-Helper は reboot 後の address を再検出し、provisioning 成功を検証し、disable
-marker を作成・確認します。その後、実行中・永続化済みの両 configuration から正確な
-seed を detach し、それを確認できた場合だけ file を削除します。検査や検証に
-失敗した場合は seed を残して error を報告します。
+Helper は provisioning 成功を検証して disable marker を作成・確認し、その後に必要な
+reboot を行います。Kernel boot ID が変わるまで reboot 完了とは見なさず、DHCP address
+も再検出します。その後、実行中・永続化済みの両 configuration から正確な seed を
+detach し、それを確認できた場合だけ file を削除します。検査や検証に失敗した場合は
+seed を残して error を報告します。
 Provisioning の確認には timeout 付きの non-blocking SSH poll を使います。
 Remote check が応答しなくなった場合、その SSH 呼び出しだけを終了し、文書化された
 全体 deadline まで再試行します。

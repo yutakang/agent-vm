@@ -192,6 +192,8 @@ wait_for_guest_ssh() {
 finalize_managed_guest() {
   local managed_seed_image="${VM_IMAGE_DIR}/${VM_NAME}-seed.img"
   local provisioning_attempts=1080
+  local pre_reboot_boot_id
+  local reboot_required
   local live_blocks
   local config_blocks
   local seed_targets
@@ -245,24 +247,52 @@ finalize_managed_guest() {
     die "Finalization stopped without changing cloud-init or deleting the seed."
   fi
 
-  if guest_ssh "test -e /var/run/reboot-required"; then
-    log "Rebooting once to activate guest kernel and desktop updates"
-    guest_ssh \
-      "sudo systemctl reboot" >/dev/null 2>&1 || true
-
-    # The guest may return with a different lease. Successful SSH plus the
-    # provisioning marker is the meaningful post-reboot condition.
-    GUEST_IP=""
-    if ! wait_for_guest_ssh 180 \
-        "sudo test -f /var/lib/kvm-agent/provisioned"; then
-      die "The guest did not become reachable after its update reboot. Finalization stopped before cleanup."
-    fi
-  fi
-
+  # Disable cloud-init while the verified guest is stable. In earlier releases
+  # this happened after requesting a reboot, which allowed the asynchronous
+  # shutdown to race the next SSH command. Keeping the seed attached until all
+  # post-reboot checks pass remains fail-closed.
   log "Disabling future cloud-init runs in the guest"
   guest_ssh \
     "sudo install -o root -g root -m 0644 /dev/null /etc/cloud/cloud-init.disabled" \
     || die "Could not disable future cloud-init runs; the seed was retained."
+  guest_ssh \
+    "sudo test -f /etc/cloud/cloud-init.disabled" || die \
+    "Could not verify the cloud-init disable marker; the seed was retained."
+
+  if ! reboot_required="$(
+      guest_ssh \
+        "if test -e /var/run/reboot-required; then printf 'yes\n'; else printf 'no\n'; fi"
+    )"; then
+    die "Could not determine whether the guest requires a reboot; cloud-init is disabled and the seed was retained."
+  fi
+  [[ "$reboot_required" == "yes" || "$reboot_required" == "no" ]] || die \
+    "The guest returned an invalid reboot-required state; cloud-init is disabled and the seed was retained."
+
+  if [[ "$reboot_required" == "yes" ]]; then
+    if ! pre_reboot_boot_id="$(
+        guest_ssh "cat /proc/sys/kernel/random/boot_id"
+      )"; then
+      die "Could not read the guest boot ID before reboot; cloud-init is disabled and the seed was retained."
+    fi
+    [[ "$pre_reboot_boot_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || die \
+      "The guest returned an invalid boot ID; cloud-init is disabled and the seed was retained."
+
+    log "Rebooting once to activate guest kernel and desktop updates"
+    guest_ssh \
+      "sudo systemctl reboot" >/dev/null 2>&1 || true
+
+    # systemctl reboot is asynchronous: SSH may briefly remain usable while
+    # pam_nologin is already preparing shutdown. A changed kernel boot ID, not
+    # merely a successful SSH connection, proves that the new boot is running.
+    # The guest may also return with a different DHCP lease.
+    GUEST_IP=""
+    if ! wait_for_guest_ssh 180 \
+        "sudo test -f /var/lib/kvm-agent/provisioned && sudo test -f /etc/cloud/cloud-init.disabled && new_boot_id=\$(cat /proc/sys/kernel/random/boot_id) && test \"\$new_boot_id\" != \"$pre_reboot_boot_id\""; then
+      die "The guest did not complete its update reboot within 15 minutes; cloud-init is disabled and the seed was retained."
+    fi
+  fi
+
+  # Re-check the marker in the final boot before touching the seed.
   guest_ssh \
     "sudo test -f /etc/cloud/cloud-init.disabled" || die \
     "Could not verify the cloud-init disable marker; the seed was retained."

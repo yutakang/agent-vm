@@ -234,9 +234,9 @@ Isabelle 配布物を含む大きな installer と archive は、guest の root 
 
 `--no-wait` は provisioning 完了前に戻るため、その時点では cloud-init seed の
 削除や将来の cloud-init 実行の無効化はできません。後で repository の helper を
-実行してください。Helper は provisioning 成功を待ち、必要な update reboot を行い、
-変更された DHCP address を再検出し、guest marker を検証してから cloud-init を
-無効化し、seed を削除します。
+実行してください。Helper は provisioning 成功と guest marker を検証し、cloud-init
+を無効化してから必要な update reboot を行い、新しい boot の完了を確認し、変更された
+DHCP address を再検出して seed を削除します。
 
 ```bash
 ./setup-kvm-agent.sh --finalize-existing --name NAME
@@ -267,13 +267,15 @@ Setup が update reboot 後に guest へ到達できなかったと報告して�
 ./setup-kvm-agent.sh --finalize-existing --name kvm-agent
 ```
 
-Helper は reboot 前の address を信用せず、libvirt の DHCP lease を再取得します。
 Recovery key で `/var/lib/kvm-agent/provisioned` を確認するまで cloud-init や seed
-を変更せず、実行中・永続化済みの両 device configuration から管理対象 seed が
-外れたことを検証してから、その正確な seed file だけを削除します。SSH と
-cloud-init の確認では `cloud-init status --wait` を使わず、各 SSH 呼び出しに
-hard timeout を設定します。そのため、guest への接続後に remote command が
-停止しても helper が無期限に hang することはありません。
+を変更しません。確認後、update reboot を要求する前に cloud-init disable marker を
+作成・検証します。`systemctl reboot` は非同期なので、SSH 接続成功だけを reboot 完了
+とは見なしません。Kernel boot ID が変わるまで待ち、reboot 前の address を信用せず
+libvirt の DHCP lease を再取得します。実行中・永続化済みの両 device configuration
+から管理対象 seed が外れたことを検証してから、その正確な seed file だけを削除します。
+SSH と cloud-init の確認では `cloud-init status --wait` を使わず、各 SSH 呼び出しに
+hard timeout を設定します。そのため、guest への接続後に remote command が停止しても
+helper が無期限に hang することはありません。
 `--no-wait` 後もこの helper が正式な完了手順です。
 
 ## VM を完全に削除する

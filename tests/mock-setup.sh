@@ -38,7 +38,10 @@ cat > "$TEMP_DIR/remove-kvm-agent.sh" <<'EOF'
 printf '%s\n' "$*" > "$MOCK_STATE/remove-arguments"
 rm -f -- \
   "$MOCK_STATE/domain-defined" \
+  "$MOCK_STATE/reboot-requested" \
   "$MOCK_STATE/rebooted" \
+  "$MOCK_STATE/old-boot-probe-observed" \
+  "$MOCK_STATE/reboot-before-disable" \
   "$MOCK_STATE/seed-ejected" \
   "$MOCK_STATE/cloud-init-disabled" \
   "$MOCK_STATE/provisioning-failed" \
@@ -210,6 +213,7 @@ EOF
 cat > "$TEMP_DIR/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 all_arguments="$*"
+remote_command="${@: -1}"
 if [[ "$all_arguments" == *"/var/lib/kvm-agent/provisioning-failed"* \
     && -f "$MOCK_STATE/provisioning-failed" ]]; then
   exit 42
@@ -223,20 +227,59 @@ if [[ "$all_arguments" == *"cloud-init status 2>/dev/null"* \
     && -f "$MOCK_STATE/provisioning-failed" ]]; then
   exit 1
 fi
-if [[ "$all_arguments" == *"test -e /var/run/reboot-required"* ]]; then
-  [[ -f "$MOCK_STATE/rebooted" ]] && exit 1
+if [[ "$all_arguments" == *"/var/run/reboot-required"* ]]; then
+  if [[ -f "$MOCK_STATE/rebooted" ]]; then
+    echo no
+  else
+    echo yes
+  fi
+  exit 0
+fi
+if [[ "$remote_command" == "cat /proc/sys/kernel/random/boot_id" ]]; then
+  if [[ -f "$MOCK_STATE/rebooted" ]]; then
+    echo "22222222-2222-4222-8222-222222222222"
+  else
+    echo "11111111-1111-4111-8111-111111111111"
+  fi
   exit 0
 fi
 if [[ "$all_arguments" == *"sudo systemctl reboot"* ]]; then
-  touch "$MOCK_STATE/rebooted"
+  [[ -f "$MOCK_STATE/cloud-init-disabled" ]] \
+    || touch "$MOCK_STATE/reboot-before-disable"
+  touch "$MOCK_STATE/reboot-requested"
   exit 0
+fi
+if [[ -f "$MOCK_STATE/reboot-requested" \
+    && ! -f "$MOCK_STATE/rebooted" ]]; then
+  if [[ "$remote_command" == *"/proc/sys/kernel/random/boot_id"* \
+      && "$remote_command" == *"!="* ]]; then
+    # The first SSH probe after systemctl reboot still reaches the old boot.
+    # It must not be accepted merely because SSH and the provisioning marker
+    # remain available for a moment.
+    touch \
+      "$MOCK_STATE/old-boot-probe-observed" \
+      "$MOCK_STATE/rebooted"
+    exit 1
+  fi
+  if [[ "$remote_command" == *"/etc/cloud/cloud-init.disabled"* ]]; then
+    # This is the v13 failure: the old-boot probe was accepted, then pam_nologin
+    # closed the following marker-creation connection during shutdown.
+    touch "$MOCK_STATE/rebooted"
+    exit 1
+  fi
 fi
 if [[ -f "$MOCK_STATE/rebooted" \
     && "$all_arguments" == *"@192.168.122.50"* ]]; then
   exit 1
 fi
-if [[ "$all_arguments" == *"/etc/cloud/cloud-init.disabled"* ]]; then
+if [[ "$remote_command" == \
+    "sudo install -o root -g root -m 0644 /dev/null /etc/cloud/cloud-init.disabled" ]]; then
   touch "$MOCK_STATE/cloud-init-disabled"
+fi
+if [[ "$remote_command" == \
+    "sudo test -f /etc/cloud/cloud-init.disabled" ]]; then
+  [[ -f "$MOCK_STATE/cloud-init-disabled" ]]
+  exit
 fi
 if [[ "$all_arguments" == *"installed-versions.txt"* ]]; then
   cat <<'OUTPUT'
@@ -324,6 +367,8 @@ grep -Fq "resize $TEMP_DIR/images/vms/mock-agent.qcow2 120G" \
   "$MOCK_STATE/qemu-img-resize"
 [[ -f "$MOCK_STATE/domain-defined" ]]
 [[ -f "$MOCK_STATE/rebooted" ]]
+[[ -f "$MOCK_STATE/old-boot-probe-observed" ]]
+[[ ! -f "$MOCK_STATE/reboot-before-disable" ]]
 [[ -f "$TEMP_DIR/images/vms/mock-agent.qcow2" ]]
 [[ -f "$MOCK_STATE/seed-ejected" ]]
 [[ -f "$MOCK_STATE/cloud-init-disabled" ]]

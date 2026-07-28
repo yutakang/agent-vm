@@ -438,10 +438,11 @@ finishes, because it contains the guest password hash. It is still there when
 the run used `--no-wait`, or when the eject failed and the script warned about
 it.
 
-On the normal waited path, the script also creates
-`/etc/cloud/cloud-init.disabled` after successful provisioning and any required
-first reboot. This prevents future cloud-init runs; the status command may
-therefore report `disabled` afterward. The provisioning marker and log remain:
+On the normal waited path, the script also creates and verifies
+`/etc/cloud/cloud-init.disabled` after successful provisioning and before any
+required first reboot. This prevents future cloud-init runs; the status command
+may therefore report `disabled` afterward. The provisioning marker and log
+remain:
 
 ```bash
 sudo test -f /var/lib/kvm-agent/provisioned
@@ -456,13 +457,15 @@ setup command rather than performing the individual SSH and `virsh` operations:
 ./setup-kvm-agent.sh --finalize-existing --name NAME
 ```
 
-It re-discovers the address after reboot, verifies successful provisioning,
-creates and verifies the disable marker, detaches the exact seed from both the
-live and persistent configurations, and only then removes the file. If any
-inspection or verification fails, it retains the seed and reports an error.
-The provisioning check uses bounded, non-blocking SSH polls. If a remote check
-stops responding, that individual invocation is terminated and the helper
-continues retrying until its documented overall deadline.
+It verifies successful provisioning, creates and verifies the disable marker,
+and then performs any required reboot. It requires the kernel boot ID to change
+before accepting the guest as rebooted, and re-discovers its DHCP address.
+Only then does it detach the exact seed from both the live and persistent
+configurations and remove the file. If any inspection or verification fails,
+it retains the seed and reports an error. The provisioning check uses bounded,
+non-blocking SSH polls. If a remote check stops responding, that individual
+invocation is terminated and the helper continues retrying until its documented
+overall deadline.
 
 `shred` here means "remove, and attempt to overwrite first". On SSDs,
 copy-on-write filesystems, and layered storage it cannot guarantee the old

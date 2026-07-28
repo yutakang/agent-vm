@@ -236,8 +236,9 @@ automatically on failure.
 `--no-wait` returns before provisioning finishes, so it cannot immediately
 remove the cloud-init seed or disable future cloud-init runs. Complete those
 steps later with the repository helper; it waits for successful provisioning,
-performs a required update reboot, rediscovers a changed DHCP address, verifies
-the guest marker, disables cloud-init, and removes the seed:
+verifies the guest marker, disables cloud-init, performs any required update
+reboot, proves that a new boot completed, rediscovers a changed DHCP address,
+and removes the seed:
 
 ```bash
 ./setup-kvm-agent.sh --finalize-existing --name NAME
@@ -268,14 +269,17 @@ the individual SSH and `virsh` cleanup commands. Run:
 ./setup-kvm-agent.sh --finalize-existing --name kvm-agent
 ```
 
-The helper re-queries libvirt DHCP leases instead of trusting the pre-reboot
-address. It verifies `/var/lib/kvm-agent/provisioned` through the recovery key
-before changing cloud-init or touching the seed, and verifies both the running
-and persistent device configurations before deleting the exact managed seed
-file. SSH and cloud-init checks are polled without `cloud-init status --wait`;
-each SSH invocation has a hard deadline, so a connected but blocked guest
-cannot make the helper hang indefinitely. It is also the supported completion
-path after `--no-wait`.
+The helper verifies `/var/lib/kvm-agent/provisioned` through the recovery key
+before changing cloud-init or touching the seed. It creates and verifies the
+cloud-init disable marker before requesting an update reboot. Because
+`systemctl reboot` is asynchronous, a successful SSH connection alone is not
+accepted as proof that reboot finished: the helper waits for the kernel boot ID
+to change and re-queries libvirt DHCP leases instead of trusting the pre-reboot
+address. It then verifies both the running and persistent device configurations
+before deleting the exact managed seed file. SSH and cloud-init checks are
+polled without `cloud-init status --wait`; each SSH invocation has a hard
+deadline, so a connected but blocked guest cannot make the helper hang
+indefinitely. It is also the supported completion path after `--no-wait`.
 
 ## Completely remove a VM
 

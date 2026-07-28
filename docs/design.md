@@ -42,6 +42,10 @@ sequenceDiagram
     end
     S->>G: Wait and verify over recovery SSH
     S->>G: Disable future cloud-init runs
+    opt Update reboot required
+        S->>G: Request reboot
+        G-->>S: Return with a new boot ID
+    end
     S->>L: Detach and remove NoCloud seed
     U->>L: Daily use through virt-manager
 ```
@@ -61,12 +65,15 @@ The guest then installs `ubuntu-desktop-minimal`, GNOME's display manager,
 `spice-vdagent`, and `qemu-guest-agent`.
 
 The result is a normal graphical Ubuntu environment for daily use while keeping
-the creation process scriptable. After successful provisioning and any required
-first reboot, the host disables future cloud-init runs in that guest, detaches
-the NoCloud seed, and removes the seed file.
+the creation process scriptable. After successful provisioning, the host
+disables future cloud-init runs in that guest. It then performs any required
+first reboot, verifies that the kernel boot ID changed, detaches the NoCloud
+seed, and removes the seed file.
 
 The post-reboot wait re-queries libvirt DHCP leases because an address is not a
-stable VM identity. If host-side waiting is interrupted,
+stable VM identity. It also requires a changed kernel boot ID because
+`systemctl reboot` returns before shutdown completes and SSH can briefly remain
+available on the old boot. If host-side waiting is interrupted,
 `setup-kvm-agent.sh --finalize-existing` invokes the same internal marker
 verification, cloud-init disabling, and fail-closed seed detachment without
 recreating the working VM. Provisioning completion is checked by short,

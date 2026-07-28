@@ -40,6 +40,10 @@ sequenceDiagram
     end
     S->>G: 復旧 SSH で待機・検証
     S->>G: 将来の cloud-init 実行を無効化
+    opt Update reboot が必要
+        S->>G: Reboot を要求
+        G-->>S: 新しい boot ID で復帰
+    end
     S->>L: NoCloud seed を detach・削除
     U->>L: 日常は virt-manager から利用
 ```
@@ -57,11 +61,14 @@ Ubuntu Server 公式 cloud image は cloud-init を持ち、GUI installer 画面
 `spice-vdagent`、`qemu-guest-agent` を導入します。
 
 結果は日常利用できる通常の GUI 付き Ubuntu でありながら、作成過程を script 化
-できます。provisioning と必要な初回 reboot が成功した後、host はその guest での
-将来の cloud-init 実行を無効化し、NoCloud seed を detach して seed file を削除します。
+できます。provisioning 成功後、host はその guest での将来の cloud-init 実行を
+無効化します。その後、必要な初回 reboot を行い、kernel boot ID の変化を確認してから、
+NoCloud seed を detach して seed file を削除します。
 
 IP address は安定した VM identity ではないため、reboot 後の待機では libvirt の
-DHCP lease を再取得します。Host 側の待機が中断した場合は、
+DHCP lease を再取得します。また、`systemctl reboot` は shutdown 完了前に戻り、古い
+boot への SSH が短時間成功し得るため、kernel boot ID が変わることも要求します。
+Host 側の待機が中断した場合は、
 `setup-kvm-agent.sh --finalize-existing` が同じ内部処理を使い、working VM を
 作り直さずに marker 検証、cloud-init 無効化、fail-closed な seed detach を
 再実行します。Provisioning 完了は短い non-blocking poll で確認し、各 recovery
