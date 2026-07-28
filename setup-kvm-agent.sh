@@ -7,7 +7,8 @@ umask 077
 # Run this script as the ordinary Ubuntu host account that will use
 # virt-manager. Do not run the script itself with sudo; it asks for sudo only
 # for host package installation and system-libvirt operations. Third-party
-# coding-agent installers execute inside the guest, never on the host.
+# coding-agent and optional formal-methods installers execute inside the guest,
+# never on the host.
 
 readonly GUEST_RELEASE="24.04"
 readonly GUEST_ARCH="amd64"
@@ -16,6 +17,7 @@ readonly LIBVIRT_NETWORK="default"
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly IMAGE_DIR="/var/lib/libvirt/images/kvm-agent"
 readonly VM_IMAGE_DIR="${IMAGE_DIR}/vms"
+readonly SSH_COMMAND_TIMEOUT_SECONDS=20
 
 VM_NAME="kvm-agent"
 GUEST_USER="agent"
@@ -27,6 +29,7 @@ RESTRICT_PRIVATE_NETWORKS="yes"
 GATEWAY_ADDRESS=""
 OPERATION="create"
 REPLACE_EXISTING="no"
+WITH_FORMAL_METHODS="no"
 
 WORK_DIR=""
 VM_DISK=""
@@ -39,7 +42,7 @@ Usage:
   ./setup-kvm-agent.sh [OPTIONS]
 
 Create a graphical Ubuntu 24.04 LTS KVM guest and install Codex, Claude Code,
-OpenCode, Aider, and Ollama inside it.
+OpenCode, Aider, and Ollama inside it. Formal-methods tools are optional.
 
 Options:
   --name NAME        VM and host name (default: kvm-agent)
@@ -51,6 +54,10 @@ Options:
   --allow-lan        Permit guest egress to private and link-local address
                      ranges. The firewall remains enabled and still denies
                      unsolicited inbound traffic. Use only when needed.
+  --formal-methods   Also install Lean 4/elan, Isabelle2025-2/HOL,
+                     GHC/GHCup, Cabal, HLS, HLint, VS Code, and the official
+                     Lean and Haskell VS Code extensions inside the guest.
+                     This may add several hours to first provisioning.
   --replace-existing Completely remove an existing VM of the selected name,
                      then create it again. The exact VM name must be typed to
                      confirm deletion. Shared caches and extra disks are kept.
@@ -93,24 +100,69 @@ guest_ipv4_addresses() {
       '
 }
 
+guest_ssh_to() {
+  local address="$1"
+  local timeout_seconds="$2"
+  shift 2
+
+  timeout --foreground --signal=TERM --kill-after=5s \
+    "${timeout_seconds}s" \
+    ssh "${ssh_options[@]}" "${GUEST_USER}@${address}" "$@"
+}
+
+guest_ssh() {
+  [[ -n "$GUEST_IP" ]] || return 2
+  guest_ssh_to "$GUEST_IP" "$SSH_COMMAND_TIMEOUT_SECONDS" "$@"
+}
+
 # Set GUEST_IP to a current address that belongs to this domain and accepts the
 # repository recovery key. Re-query every iteration because DHCP may assign a
-# different address after reboot.
+# different address after reboot. Every SSH command has its own hard deadline,
+# so a connected guest cannot defeat the overall retry limit by leaving a
+# remote command blocked. The first argument denotes five-second polling slots;
+# an absolute wall-clock deadline enforces the corresponding overall limit.
 wait_for_guest_ssh() {
   local attempts="$1"
   local remote_check="${2:-true}"
   local candidate
+  local started="$SECONDS"
+  local deadline=$((SECONDS + attempts * 5))
+  local next_progress=$((SECONDS + 60))
+  local probe_timeout
+  local probe_status
+  local remaining
 
-  for _ in $(seq 1 "$attempts"); do
+  while ((SECONDS < deadline)); do
     while IFS= read -r candidate; do
       [[ -n "$candidate" ]] || continue
-      if ssh "${ssh_options[@]}" "${GUEST_USER}@${candidate}" \
+      remaining=$((deadline - SECONDS))
+      ((remaining > 0)) || return 1
+      probe_timeout="$SSH_COMMAND_TIMEOUT_SECONDS"
+      ((probe_timeout <= remaining)) || probe_timeout="$remaining"
+      if guest_ssh_to "$candidate" "$probe_timeout" \
           "$remote_check" >/dev/null 2>&1; then
         GUEST_IP="$candidate"
         return 0
+      else
+        probe_status=$?
+        if ((probe_status == 42)); then
+          GUEST_IP="$candidate"
+          return 2
+        fi
       fi
     done < <(guest_ipv4_addresses)
-    sleep 5
+    remaining=$((deadline - SECONDS))
+    ((remaining > 0)) || break
+    if ((SECONDS >= next_progress)); then
+      printf 'Still waiting for the guest (%d minute(s) elapsed)...\n' \
+        "$(((SECONDS - started) / 60))" >&2
+      next_progress=$((SECONDS + 60))
+    fi
+    if ((remaining < 5)); then
+      sleep "$remaining"
+    else
+      sleep 5
+    fi
   done
   return 1
 }
@@ -120,10 +172,12 @@ wait_for_guest_ssh() {
 # key reaches this named domain and the guest provisioning marker is present.
 finalize_managed_guest() {
   local managed_seed_image="${VM_IMAGE_DIR}/${VM_NAME}-seed.img"
+  local provisioning_attempts=1080
   local live_blocks
   local config_blocks
   local seed_targets
   local seed_target
+  local wait_status=0
 
   [[ -r "$SSH_PRIVATE_KEY" ]] || die \
     "Recovery SSH key not found: $SSH_PRIVATE_KEY"
@@ -133,31 +187,48 @@ finalize_managed_guest() {
   ssh_options=(
     -o BatchMode=yes
     -o ConnectTimeout=5
+    -o ConnectionAttempts=1
     -o ForwardAgent=no
     -o IdentitiesOnly=yes
+    -o ServerAliveCountMax=1
+    -o ServerAliveInterval=5
     -o StrictHostKeyChecking=accept-new
     -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS}"
     -i "$SSH_PRIVATE_KEY"
   )
 
+  # The ordinary agent bundle is allowed 90 minutes. The optional Lean,
+  # Isabelle and Haskell toolchains involve several large downloads and may
+  # build HLint locally, so their explicitly selected path gets six hours.
+  if [[ "$WITH_FORMAL_METHODS" == "yes" ]]; then
+    provisioning_attempts=4320
+  fi
+
   log "Waiting for recovery SSH and successful guest provisioning"
   GUEST_IP=""
-  if ! wait_for_guest_ssh 240 \
-      "sudo cloud-init status --wait && sudo test -f /var/lib/kvm-agent/provisioned"; then
-    warn "Could not verify successful provisioning within 20 minutes."
+  wait_for_guest_ssh "$provisioning_attempts" \
+    "if sudo test -f /var/lib/kvm-agent/provisioning-failed; then exit 42; fi; sudo test -f /var/lib/kvm-agent/provisioned && { test -f /etc/cloud/cloud-init.disabled || sudo cloud-init status 2>/dev/null | grep -Eq '^status: done([[:space:]]|$)'; }" \
+    || wait_status=$?
+  if ((wait_status != 0)); then
+    if ((wait_status == 2)); then
+      warn "The guest reported that provisioning failed."
+    elif [[ "$WITH_FORMAL_METHODS" == "yes" ]]; then
+      warn "Could not verify successful provisioning within six hours."
+    else
+      warn "Could not verify successful provisioning within 90 minutes."
+    fi
     # A reachable guest may still contain useful failure diagnostics.
     if wait_for_guest_ssh 1 true; then
-      ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
+      guest_ssh \
         "sudo cloud-init status --long || true; sudo tail -n 160 /var/log/kvm-agent-provision.log || true" \
         >&2 || true
     fi
     die "Finalization stopped without changing cloud-init or deleting the seed."
   fi
 
-  if ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
-      "test -e /var/run/reboot-required"; then
+  if guest_ssh "test -e /var/run/reboot-required"; then
     log "Rebooting once to activate guest kernel and desktop updates"
-    ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
+    guest_ssh \
       "sudo systemctl reboot" >/dev/null 2>&1 || true
 
     # The guest may return with a different lease. Successful SSH plus the
@@ -170,9 +241,10 @@ finalize_managed_guest() {
   fi
 
   log "Disabling future cloud-init runs in the guest"
-  ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
-    "sudo install -o root -g root -m 0644 /dev/null /etc/cloud/cloud-init.disabled"
-  ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
+  guest_ssh \
+    "sudo install -o root -g root -m 0644 /dev/null /etc/cloud/cloud-init.disabled" \
+    || die "Could not disable future cloud-init runs; the seed was retained."
+  guest_ssh \
     "sudo test -f /etc/cloud/cloud-init.disabled" || die \
     "Could not verify the cloud-init disable marker; the seed was retained."
 
@@ -244,8 +316,8 @@ finalize_managed_guest() {
   fi
 
   log "Installed guest tool versions"
-  ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
-    "sudo cat /var/lib/kvm-agent/installed-versions.txt"
+  guest_ssh "sudo cat /var/lib/kvm-agent/installed-versions.txt" || die \
+    "Cleanup succeeded, but installed tool versions could not be read."
 }
 
 # Report "present", "absent", or "unknown" for the target domain. "unknown"
@@ -339,6 +411,10 @@ while (($# > 0)); do
       RESTRICT_PRIVATE_NETWORKS="no"
       shift
       ;;
+    --formal-methods)
+      WITH_FORMAL_METHODS="yes"
+      shift
+      ;;
     --replace-existing)
       REPLACE_EXISTING="yes"
       shift
@@ -372,7 +448,8 @@ if [[ "$OPERATION" == "finalize" ]]; then
     "--finalize-existing and --replace-existing cannot be used together."
   [[ -z "$RAM_MB" && -z "$VCPUS" && "$DISK_GB" == "80" \
       && "$WAIT_FOR_GUEST" == "yes" \
-      && "$RESTRICT_PRIVATE_NETWORKS" == "yes" ]] || die \
+      && "$RESTRICT_PRIVATE_NETWORKS" == "yes" \
+      && "$WITH_FORMAL_METHODS" == "no" ]] || die \
     "--finalize-existing accepts only --name and --user."
 fi
 positive_integer "$DISK_GB" || die "--disk must be a positive integer."
@@ -399,10 +476,15 @@ readonly KEY_DIR="${HOST_USER_HOME}/.local/share/kvm-agent/${VM_NAME}"
 readonly SSH_PRIVATE_KEY="${KEY_DIR}/id_ed25519"
 readonly SSH_PUBLIC_KEY_FILE="${SSH_PRIVATE_KEY}.pub"
 readonly SSH_KNOWN_HOSTS="${KEY_DIR}/known_hosts"
+readonly PROVISIONING_MODE_FILE="${KEY_DIR}/provisioning-mode"
 ssh_options=()
 GUEST_IP=""
 
 if [[ "$OPERATION" == "finalize" ]]; then
+  if [[ -r "$PROVISIONING_MODE_FILE" ]] \
+      && grep -Fxq 'formal-methods=yes' "$PROVISIONING_MODE_FILE"; then
+    WITH_FORMAL_METHODS="yes"
+  fi
   log "Authorising finalization"
   sudo -v
   finalize_managed_guest
@@ -442,6 +524,9 @@ fi
 if ((DISK_GB < 80)); then
   warn "Less than 80 GiB leaves limited room for model weights and projects."
 fi
+if [[ "$WITH_FORMAL_METHODS" == "yes" && "$DISK_GB" -lt 100 ]]; then
+  warn "The formal-methods toolchains fit in 80 GiB, but 100-120 GiB is preferable for project dependencies and build products."
+fi
 
 log "Configuration"
 printf 'Host account:   %s\n' "$HOST_USER"
@@ -451,6 +536,13 @@ printf 'Guest release:  Ubuntu %s LTS desktop\n' "$GUEST_RELEASE"
 printf 'Resources:      %s MiB RAM, %s vCPU, %s GiB disk\n' \
   "$RAM_MB" "$VCPUS" "$DISK_GB"
 printf 'Provisioning:   Codex, Claude Code, OpenCode, Aider, Ollama\n'
+if [[ "$WITH_FORMAL_METHODS" == "yes" ]]; then
+  printf 'Formal tools:   Lean 4, Isabelle/HOL, GHC, Cabal, HLS, HLint\n'
+  printf 'Editor:         VS Code with Lean and Haskell extensions\n'
+  printf 'Time warning:   formal-methods provisioning may take several hours\n'
+else
+  printf 'Formal tools:   not requested (use --formal-methods to include them)\n'
+fi
 
 log "Authorising host setup"
 sudo -v
@@ -615,6 +707,9 @@ else
 fi
 chmod 0600 "$SSH_PRIVATE_KEY"
 chmod 0644 "$SSH_PUBLIC_KEY_FILE"
+printf 'formal-methods=%s\n' "$WITH_FORMAL_METHODS" \
+  > "$PROVISIONING_MODE_FILE"
+chmod 0600 "$PROVISIONING_MODE_FILE"
 
 # This point is only reached when no domain of this name exists, so any host
 # key recorded for a previous VM of the same name is stale. Leaving it in place
@@ -662,15 +757,35 @@ exec > >(tee -a /var/log/kvm-agent-provision.log) 2>&1
 guest_user="${1:?guest user is required}"
 restrict_private_networks="${2:?private-network policy is required}"
 gateway_address="${3:?gateway address is required}"
+with_formal_methods="${4:?formal-methods selection is required}"
 guest_home="$(getent passwd "$guest_user" | awk -F: '{print $6}')"
 guest_group="$(id -gn "$guest_user")"
-guest_path="${guest_home}/.local/bin:${guest_home}/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+guest_path="${guest_home}/.elan/bin:${guest_home}/.ghcup/bin:${guest_home}/.local/bin:${guest_home}/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 root_runtime_home="/root"
+isabelle_version="Isabelle2025-2"
+isabelle_archive_url="https://www.cl.cam.ac.uk/research/hvg/Isabelle/dist/${isabelle_version}_linux.tar.gz"
+isabelle_archive_sha256="a20a507bc7c1270d8be96a9f3fbec06345387789d2dc2c4d3df6260d47bfb33c"
 
 [[ -n "$guest_home" && -d "$guest_home" ]] || {
   echo "Cannot resolve guest home for $guest_user." >&2
   exit 1
 }
+
+install -d -o root -g root -m 0755 /var/lib/kvm-agent
+rm -f -- \
+  /var/lib/kvm-agent/provisioned \
+  /var/lib/kvm-agent/provisioning-failed
+record_provisioning_failure() {
+  local exit_status=$?
+  trap - EXIT
+  if ((exit_status != 0)); then
+    printf 'Provisioning failed: %s\n' "$(date --utc --iso-8601=seconds)" \
+      > /var/lib/kvm-agent/provisioning-failed
+    chmod 0644 /var/lib/kvm-agent/provisioning-failed
+  fi
+  exit "$exit_status"
+}
+trap record_provisioning_failure EXIT
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
@@ -696,6 +811,21 @@ apt-get install -y \
   python3 \
   python3-venv \
   ufw
+
+if [[ "$with_formal_methods" == "yes" ]]; then
+  echo "Installing Ubuntu prerequisites for Lean, Isabelle and Haskell..."
+  apt-get install -y \
+    debconf-utils \
+    gnupg \
+    libffi-dev \
+    libgmp-dev \
+    libncurses-dev \
+    libnuma-dev \
+    libtinfo-dev \
+    pkg-config \
+    wget \
+    xz-utils
+fi
 
 systemctl enable --now qemu-guest-agent.service
 systemctl enable ssh.service
@@ -754,11 +884,17 @@ install -d -o "$guest_user" -g "$guest_group" -m 0755 \
   "$guest_home/.local/state" \
   "$guest_home/.config" \
   "$guest_home/.cache" \
-  "$guest_home/.local/share/kvm-agent"
+  "$guest_home/.local/share/kvm-agent" \
+  "$guest_home/.elan" \
+  "$guest_home/.ghcup" \
+  "$guest_home/.ghcup/bin" \
+  "$guest_home/.cabal"
 
 cat > /etc/profile.d/kvm-agent-tools.sh <<'PROFILE'
 # Paths used by the per-user native coding-agent installers.
 if [ -n "${HOME:-}" ]; then
+  [ ! -d "$HOME/.elan/bin" ] || PATH="$HOME/.elan/bin:$PATH"
+  [ ! -d "$HOME/.ghcup/bin" ] || PATH="$HOME/.ghcup/bin:$PATH"
   [ ! -d "$HOME/.opencode/bin" ] || PATH="$HOME/.opencode/bin:$PATH"
   [ ! -d "$HOME/.local/bin" ] || PATH="$HOME/.local/bin:$PATH"
   export PATH
@@ -769,7 +905,7 @@ chmod 0644 /etc/profile.d/kvm-agent-tools.sh
 cat >> "$guest_home/.profile" <<'PROFILE'
 
 # KVM-Agent tool paths
-export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
+export PATH="$HOME/.elan/bin:$HOME/.ghcup/bin:$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
 PROFILE
 chown "$guest_user:$guest_group" "$guest_home/.profile"
 
@@ -806,6 +942,79 @@ install_guest_script() {
   as_guest bash "$installer_path"
   rm -f -- "$installer_path"
 }
+
+install_formal_methods() {
+  local vscode_deb="${staging_dir}/vscode-amd64.deb"
+  local elan_installer="${staging_dir}/elan-init.sh"
+  local ghcup_installer="${staging_dir}/bootstrap-haskell"
+  local isabelle_archive="${staging_dir}/${isabelle_version}_linux.tar.gz"
+  local isabelle_destination="/opt/${isabelle_version}"
+
+  echo "Installing Visual Studio Code inside the graphical guest..."
+  echo "code code/add-microsoft-repo boolean true" \
+    | debconf-set-selections
+  curl --proto '=https' --tlsv1.2 --fail --show-error --location --retry 3 \
+    "https://update.code.visualstudio.com/latest/linux-deb-x64/stable" \
+    --output "$vscode_deb"
+  chown root:root "$vscode_deb"
+  chmod 0444 "$vscode_deb"
+  apt-get install -y "$vscode_deb"
+  rm -f -- "$vscode_deb"
+
+  echo "Installing Lean 4 through the official elan toolchain manager..."
+  curl --proto '=https' --tlsv1.2 --fail --show-error --location --retry 3 \
+    "https://elan.lean-lang.org/elan-init.sh" \
+    --output "$elan_installer"
+  chown root:root "$elan_installer"
+  chmod 0555 "$elan_installer"
+  as_guest sh "$elan_installer" \
+    -y --no-modify-path --default-toolchain stable
+  rm -f -- "$elan_installer"
+
+  echo "Installing Isabelle/HOL ${isabelle_version}..."
+  curl --proto '=https' --tlsv1.2 --fail --show-error --location --retry 3 \
+    "$isabelle_archive_url" --output "$isabelle_archive"
+  printf '%s  %s\n' "$isabelle_archive_sha256" "$isabelle_archive" \
+    | sha256sum --check --strict -
+  rm -rf -- "$isabelle_destination"
+  tar -xzf "$isabelle_archive" -C /opt
+  [[ -x "$isabelle_destination/bin/isabelle" ]] || {
+    echo "Unexpected Isabelle archive layout." >&2
+    exit 1
+  }
+  chown -R root:root "$isabelle_destination"
+  ln -sfn "$isabelle_destination/bin/isabelle" /usr/local/bin/isabelle
+  rm -f -- "$isabelle_archive"
+
+  echo "Installing GHC, Cabal and Haskell Language Server through GHCup..."
+  curl --proto '=https' --tlsv1.2 --fail --show-error --location --retry 3 \
+    "https://get-ghcup.haskell.org" --output "$ghcup_installer"
+  chown root:root "$ghcup_installer"
+  chmod 0555 "$ghcup_installer"
+  as_guest env \
+    BOOTSTRAP_HASKELL_NONINTERACTIVE=1 \
+    BOOTSTRAP_HASKELL_INSTALL_HLS=1 \
+    BOOTSTRAP_HASKELL_INSTALL_NO_STACK=1 \
+    sh "$ghcup_installer"
+  rm -f -- "$ghcup_installer"
+
+  echo "Installing HLint through Cabal..."
+  as_guest cabal update
+  as_guest cabal install \
+    --jobs=2 \
+    --install-method=copy \
+    --installdir="$guest_home/.local/bin" \
+    --overwrite-policy=always \
+    hlint
+
+  echo "Installing the official Lean and Haskell VS Code extensions..."
+  as_guest code --install-extension leanprover.lean4 --force
+  as_guest code --install-extension haskell.haskell --force
+}
+
+if [[ "$with_formal_methods" == "yes" ]]; then
+  install_formal_methods
+fi
 
 install_guest_script codex "https://chatgpt.com/codex/install.sh"
 install_guest_script claude-code "https://claude.ai/install.sh"
@@ -866,6 +1075,21 @@ if ss -ltnH 'sport = :11434' \
 fi
 
 echo "Verifying installed commands..."
+if [[ "$with_formal_methods" == "yes" ]]; then
+  vscode_extensions="$(as_guest code --list-extensions)"
+  as_guest timeout 60s code --version
+  as_guest timeout 60s elan --version
+  as_guest timeout 60s lean --version
+  as_guest timeout 60s lake --version
+  timeout 60s isabelle version
+  as_guest timeout 60s ghcup --version
+  as_guest timeout 60s ghc --version
+  as_guest timeout 60s cabal --version
+  as_guest timeout 60s haskell-language-server-wrapper --version
+  as_guest timeout 60s hlint --version
+  grep -Fxq leanprover.lean4 <<< "$vscode_extensions"
+  grep -Fxq haskell.haskell <<< "$vscode_extensions"
+fi
 as_guest timeout 30s codex --version
 as_guest timeout 30s claude --version
 as_guest timeout 30s opencode --version
@@ -874,9 +1098,25 @@ env HOME="$root_runtime_home" OLLAMA_HOST=127.0.0.1:11434 \
   timeout 30s ollama --version
 systemctl is-active --quiet ollama.service
 
-install -d -o root -g root -m 0755 /var/lib/kvm-agent
 {
   printf 'Provisioned: %s\n' "$(date --utc --iso-8601=seconds)"
+  if [[ "$with_formal_methods" == "yes" ]]; then
+    printf '\nFormal methods and editor:\n'
+    as_guest code --version
+    as_guest elan --version
+    as_guest lean --version
+    as_guest lake --version
+    isabelle version
+    as_guest ghcup --version
+    as_guest ghc --version
+    as_guest cabal --version
+    as_guest haskell-language-server-wrapper --version
+    as_guest hlint --version
+    printf 'VS Code extensions:\n'
+    as_guest code --list-extensions \
+      | grep -E '^(leanprover\.lean4|haskell\.haskell)$'
+    printf '\nCoding agents:\n'
+  fi
   as_guest codex --version
   as_guest claude --version
   as_guest opencode --version
@@ -884,13 +1124,15 @@ install -d -o root -g root -m 0755 /var/lib/kvm-agent
   env HOME="$root_runtime_home" OLLAMA_HOST=127.0.0.1:11434 ollama --version
 } > /var/lib/kvm-agent/installed-versions.txt
 chmod 0644 /var/lib/kvm-agent/installed-versions.txt
-touch /var/lib/kvm-agent/provisioned
 
 # Start the display manager last so package installation cannot replace the
 # user's visible session halfway through provisioning.
 systemctl enable gdm3.service
 systemctl start gdm3.service
 
+touch /var/lib/kvm-agent/provisioned
+rm -f -- /var/lib/kvm-agent/provisioning-failed
+trap - EXIT
 echo "KVM-Agent graphical guest provisioning completed successfully."
 GUEST_SCRIPT
 chmod 0700 "$WORK_DIR/guest-provision.sh"
@@ -934,7 +1176,7 @@ write_files:
     content: ${GUEST_PROVISION_B64}
 
 runcmd:
-  - ["/usr/local/sbin/kvm-agent-provision", "${GUEST_USER}", "${RESTRICT_PRIVATE_NETWORKS}", "${GATEWAY_ADDRESS}"]
+  - ["/usr/local/sbin/kvm-agent-provision", "${GUEST_USER}", "${RESTRICT_PRIVATE_NETWORKS}", "${GATEWAY_ADDRESS}", "${WITH_FORMAL_METHODS}"]
 
 final_message: "KVM-Agent cloud-init finished after \$UPTIME seconds; verify cloud-init status."
 EOF
@@ -1000,6 +1242,11 @@ print_next_steps() {
     "$SSH_PRIVATE_KEY" "$GUEST_USER" "$guest_ip"
   printf 'Inside the desktop terminal, start a tool with:\n'
   printf '  codex    claude    opencode    aider    ollama\n'
+  if [[ "$WITH_FORMAL_METHODS" == "yes" ]]; then
+    printf '  code     lean      lake        isabelle\n'
+    printf '  ghc      ghci      cabal       hlint\n'
+    printf 'For Isabelle/HOL, run: isabelle jedit\n'
+  fi
 }
 
 if [[ "$WAIT_FOR_GUEST" != "yes" ]]; then
@@ -1012,7 +1259,11 @@ if [[ "$WAIT_FOR_GUEST" != "yes" ]]; then
 fi
 
 log "Waiting for desktop and agent-tool provisioning to finish"
-printf 'This commonly takes 20-60 minutes and may take longer on a slow host.\n'
+if [[ "$WITH_FORMAL_METHODS" == "yes" ]]; then
+  printf 'Lean, Isabelle, Haskell, HLint, VS Code, and the agent tools may take several hours to install.\n'
+else
+  printf 'This commonly takes 20-60 minutes and may take longer on a slow host.\n'
+fi
 finalize_managed_guest
 
 log "KVM-Agent setup completed"

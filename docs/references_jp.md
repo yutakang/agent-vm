@@ -31,6 +31,23 @@ Installation interface、対応 Ubuntu release、provider route、security behav
 これらが `setup-kvm-agent.sh` の installation origin です。Script は guest 内から
 download します。
 
+## 任意の形式手法・editor 環境
+
+- [Lean installation](https://lean-lang.org/install/)
+- [elan: Lean version manager](https://github.com/leanprover/elan)
+- [Lean 4 VS Code extension](https://marketplace.visualstudio.com/items?itemName=leanprover.lean4)
+- [Isabelle current release](https://isabelle.in.tum.de/)
+- [Isabelle installation](https://isabelle.in.tum.de/installation.html)
+- [Isabelle2025-2 NEWS](https://www.cl.cam.ac.uk/research/hvg/Isabelle/dist/Isabelle2025-2/doc/NEWS.html)
+- [GHCup installation](https://www.haskell.org/ghcup/install/)
+- [GHCup user guide](https://www.haskell.org/ghcup/guide/)
+- [Haskell VS Code extension](https://marketplace.visualstudio.com/items?itemName=haskell.haskell)
+- [Visual Studio Code on Linux](https://code.visualstudio.com/docs/setup/linux)
+
+縮小 profile は Lean、Haskell、VS Code、extension について現在の公式 channel に
+従います。Isabelle2025-2 は明示選択し、公式 Linux archive の checksum を検証します。
+[縮小形式手法環境](formal-methods_jp.md)も参照してください。
+
 ## Provider 設定
 
 - [Codex configuration](https://developers.openai.com/codex/config-reference)

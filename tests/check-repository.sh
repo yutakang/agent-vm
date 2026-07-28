@@ -90,6 +90,7 @@ for required in \
     docs/credentials.md docs/credentials_jp.md \
     docs/agent-tools-and-model-services.md \
     docs/agent-tools-and-model-services_jp.md \
+    docs/formal-methods.md docs/formal-methods_jp.md \
     docs/troubleshooting.md docs/troubleshooting_jp.md \
     docs/references.md docs/references_jp.md; do
   [[ -s "${REPO_DIR}/${required}" ]] || fail "missing or empty: $required"
@@ -101,6 +102,16 @@ for required_text in \
     "https://opencode.ai/install" \
     "aider-chat@latest" \
     "https://ollama.com/install.sh" \
+    "https://elan.lean-lang.org/elan-init.sh" \
+    "https://www.cl.cam.ac.uk/research/hvg/Isabelle/dist/" \
+    "https://get-ghcup.haskell.org" \
+    "https://update.code.visualstudio.com/latest/linux-deb-x64/stable" \
+    "leanprover.lean4" \
+    "haskell.haskell" \
+    "haskell-language-server-wrapper" \
+    "hlint" \
+    "--formal-methods" \
+    "formal-methods=yes" \
     "OLLAMA_HOST=127.0.0.1:11434" \
     "ubuntu-desktop-minimal" \
     "graphics \"spice,listen=none\"" \
@@ -116,6 +127,18 @@ for required_text in \
     || fail "setup script is missing: $required_text"
 done
 
+grep -Fq \
+  'isabelle_archive_sha256="a20a507bc7c1270d8be96a9f3fbec06345387789d2dc2c4d3df6260d47bfb33c"' \
+  "$TEMP_DIR/guest-provision.sh" || fail \
+  "guest provisioning omits the reviewed Isabelle2025-2 checksum"
+
+for excluded_formal_tool in agda rocq opam hol4 hol-light; do
+  if rg -n --glob 'setup-kvm-agent.sh' \
+      "\\b${excluded_formal_tool}\\b" "$REPO_DIR" >/dev/null; then
+    fail "reduced formal-methods profile still installs or documents: $excluded_formal_tool"
+  fi
+done
+
 for forbidden_text in \
     "/tmp/kvm-agent-install-" \
     "usermod -aG libvirt,kvm" \
@@ -127,11 +150,13 @@ done
 
 for required_text in \
     "/var/lib/kvm-agent/provisioned" \
+    "/var/lib/kvm-agent/provisioning-failed" \
     "/etc/cloud/cloud-init.disabled" \
     "domifaddr" \
     "domblklist" \
     "--inactive --details" \
     "change-media" \
+    "timeout --foreground" \
     "shred --remove --zero"; do
   grep -Fq -- "$required_text" "$SETUP_SCRIPT" \
     || fail "integrated finalization is missing: $required_text"
@@ -141,6 +166,9 @@ done
   "obsolete standalone finalize-kvm-agent.sh still exists"
 [[ ! -e "${SCRIPT_DIR}/mock-finalize.sh" ]] || fail \
   "obsolete standalone finalization test still exists"
+if grep -Fq -- "cloud-init status --wait" "$SETUP_SCRIPT"; then
+  fail "setup script still contains an unbounded cloud-init wait"
+fi
 if rg -n --glob '*.md' --glob '*.sh' --glob '!check-repository.sh' \
     'finalize-kvm-agent\.sh' "$REPO_DIR" >/dev/null; then
   fail "repository still refers to finalize-kvm-agent.sh"

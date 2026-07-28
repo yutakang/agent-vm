@@ -194,7 +194,10 @@ Application 設定だけを network security boundary と見なしてはいけ�
 
 Host が導入するのは、設定済み Ubuntu APT repository の package だけです。その後、
 guest が Codex、Claude Code、OpenCode、Aider 依存関係、Ollama の現在の公式
-installation channel を利用します。
+installation channel を利用します。`--formal-methods` では elan/Lean、
+GHCup/Haskell、HLint、VS Code、二つの extension にも同じ方針を適用します。
+Isabelle2025-2 は例外で、選択 archive を展開前に固定の review 済み SHA-256 と
+照合します。
 
 これは以前の署名済み offline bundle と厳密 lock file より意図的に単純です。
 次の trade-off が重要です。

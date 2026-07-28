@@ -35,8 +35,11 @@ sequenceDiagram
     S->>S: Verify Ubuntu signed image manifest
     S->>L: Define graphical VM
     L->>G: Boot cloud image with NoCloud seed
-    G->>P: Fetch current official agent releases
-    G->>G: Install desktop and five tools
+    G->>P: Fetch current official tool releases
+    G->>G: Install desktop and five agent tools
+    opt --formal-methods
+        G->>G: Install reduced formal environment and editor
+    end
     S->>G: Wait and verify over recovery SSH
     S->>G: Disable future cloud-init runs
     S->>L: Detach and remove NoCloud seed
@@ -66,7 +69,10 @@ The post-reboot wait re-queries libvirt DHCP leases because an address is not a
 stable VM identity. If host-side waiting is interrupted,
 `setup-kvm-agent.sh --finalize-existing` invokes the same internal marker
 verification, cloud-init disabling, and fail-closed seed detachment without
-recreating the working VM.
+recreating the working VM. Provisioning completion is checked by short,
+non-blocking polls. Every recovery SSH invocation is also wrapped in a
+host-side deadline, so neither an SSH session nor a remote cloud-init command
+can bypass the overall retry limit.
 
 ## Why system libvirt
 
@@ -166,11 +172,17 @@ official native installer channels. Aider is installed as the guest user via
 `uv` in an isolated tool environment. The script checks that every CLI reports a
 version and that Ollama responds only on guest loopback.
 
+The optional `--formal-methods` branch is part of the same embedded guest
+program, not a restored provisioning subsystem. It adds only Lean/elan,
+Isabelle2025-2/HOL, GHCup/GHC/Cabal/HLS/HLint, guest-side VS Code, and the
+official Lean and Haskell extensions. Isabelle's archive has a fixed reviewed
+checksum; the other tools follow their current official channels.
+
 This is release-channel reproducibility, not byte-level reproducibility. The
-former exact pins, package locks, signed offline ISO path, and formal-methods
-toolchain were removed to make the ordinary setup small and maintainable. Users
-with institutional artifact-review requirements should build an internally
-signed golden image instead of treating this personal convenience path as a
+former comprehensive profiles, package locks, and signed offline ISO path were
+removed to make the ordinary setup small and maintainable. Users with
+institutional artifact-review requirements should build an internally signed
+golden image instead of treating this personal convenience path as a
 supply-chain guarantee.
 
 ## Deliberately omitted features
@@ -180,7 +192,8 @@ supply-chain guarantee.
 - host/guest shared inboxes;
 - automatic GitHub fork or deploy-key setup;
 - VS Code installation on the host;
-- formal-methods profiles;
+- comprehensive or selectable formal-methods profiles beyond the single
+  reduced opt-in set;
 - host-enforced network policy: the private-network block is a guest firewall,
   not a libvirt `nwfilter`;
 - GPU and USB passthrough; and

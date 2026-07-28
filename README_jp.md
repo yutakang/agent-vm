@@ -25,6 +25,16 @@ VM を作り、最小 Ubuntu デスクトップと要求された五つのツー
 完了まで待ちます。日常的な操作には使い慣れた `virt-manager` の GUI を
 使います。
 
+縮小した形式手法環境は opt-in で追加できます。
+
+```bash
+./setup-kvm-agent.sh --formal-methods
+```
+
+同じ GUI 付き guest 内へ Lean 4、Isabelle/HOL、GHC、Cabal、Haskell Language
+Server、HLint、VS Code、および公式 Lean/Haskell extension だけを追加します。
+旧 repository の architecture や大きな prover collection は復活させません。
+
 同じコマンドで、中断した finalization の再開や使い捨て VM の置換もできます。
 再作成せず削除だけを行う小さな helper も残しています。
 
@@ -48,8 +58,10 @@ flowchart TB
         D["GNOME デスクトップと端末"]
         A["Codex · Claude Code · OpenCode · Aider"]
         O["127.0.0.1 上の Ollama"]
+        F["任意: Lean · Isabelle/HOL · Haskell · VS Code"]
         D --> A
         D --> O
+        D --> F
     end
 
     P["選択したリモートプロバイダーまたはローカルモデル"]
@@ -80,10 +92,14 @@ system libvirt/KVM 境界を操作する GUI クライアントです。ホス�
    ホストディレクトリを共有しない GUI 付き VM を作る。
 7. Codex、Claude Code、OpenCode、Ollama の公式インストーラーをゲスト内で
    ダウンロード・実行し、Aider を利用者専用 `uv` 環境へ導入する。
-8. ベンダー installer を実行する前に、未要求の inbound 通信と、既定では
+8. `--formal-methods` を選んだ場合、Lean を `elan` から、
+   Isabelle2025-2/HOL を checksum 検証した公式 Linux archive から、
+   GHC/Cabal/HLS を GHCup から、HLint を Cabal から導入し、さらに VS Code と
+   公式 Lean/Haskell extension を導入する。
+9. ベンダー installer を実行する前に、未要求の inbound 通信と、既定では
    private・link-local address range への outbound 通信を拒否する guest firewall を
    構成する（インターネット接続は開いたまま）。
-9. 各コマンドを検証し、Ollama をゲストのループバック
+10. 各コマンドを検証し、Ollama をゲストのループバック
    (`127.0.0.1:11434`) に限定し、将来の cloud-init 実行を無効化してから、
    プロビジョニング完了後に cloud-init seed を破棄する。
 
@@ -96,11 +112,11 @@ system libvirt/KVM 境界を操作する GUI クライアントです。ホス�
 - ホストのホームやプロジェクトディレクトリをゲストへマウントする。
 - USB パススルー、SSH agent forwarding、LAN 公開 VM コンソールを設定する。
 - モデルプロバイダーを選ぶ。
-- 以前の `formal_methods` プロファイルを導入する。
+- Agda、Rocq/OCaml、HOL4、HOL Light、Mathlib、Archive of Formal Proofs を
+  導入する。
 
-形式手法ツールはプロジェクト固有なので、必要な VM の中へ個別に導入できます。
-エージェント環境だけが必要な利用者は、その保守・プロビジョニング費用を負わなく
-なりました。
+縮小形式手法環境は任意なので、エージェント環境だけが必要な利用者は、その
+download、disk、provisioning 費用を負いません。
 
 ## 必要条件
 
@@ -114,7 +130,7 @@ system libvirt/KVM 境界を操作する GUI クライアントです。ホス�
 | ホスト権限 | 実行アカウントが `sudo` を利用可能 |
 | ネットワーク | 初回プロビジョニング中にインターネット接続 |
 | 表示 | `virt-manager` 用のローカル GUI Ubuntu セッション |
-| ディスク | 50 GiB 以上の空き。80 GiB 以上を推奨 |
+| ディスク | 50 GiB 以上の空き。通常は 80 GiB、`--formal-methods` では 100～120 GiB を推奨 |
 | メモリ | ゲスト 8 GiB を推奨。ホストへ 2 GiB 以上残す |
 
 既定メモリはホスト RAM の半分を 8～16 GiB の範囲に収めた値です。既定
@@ -142,7 +158,9 @@ chmod +x setup-kvm-agent.sh
 
 初回プロビジョニングは通常 20～60 分かかります。遅いマシンではデスクトップ
 導入、Ubuntu 更新、上流ダウンロードにさらに時間がかかる場合があります。
-端末には現在の段階が表示され、既定では完了まで待ちます。
+`--formal-methods` では Isabelle、Lean、GHC、HLS、VS Code の大きな download と
+HLint build のため、**数時間かかる場合があります**。Host terminal は既定で
+待機し、この profile には 6 時間の上限を設けます。
 
 スクリプト完了後、そのホストアカウントが初めて `libvirt` に追加された
 場合は、Ubuntu **ホスト**から一度ログアウトして再ログインします。その後、
@@ -166,6 +184,22 @@ ollama --version
 各コーディングエージェントは、初回起動時に独自の認証またはプロバイダー設定を
 行います。その前に[認証情報の取り扱い](docs/credentials_jp.md)を読んでください。
 
+`--formal-methods` を指定した guest では次も使えます。
+
+```bash
+code
+lean --version
+lake --version
+isabelle jedit
+ghc --version
+cabal --version
+haskell-language-server-wrapper --version
+hlint --version
+```
+
+正確な対象、editor の扱い、update model は
+[縮小形式手法環境](docs/formal-methods_jp.md)を参照してください。
+
 ## オプション
 
 ```text
@@ -178,6 +212,8 @@ ollama --version
 --allow-lan        private・link-local address range への外向き通信を許可する。
                    UFW は有効なままで、未要求の inbound 通信は引き続き拒否する。
                    社内ミラーやモデル endpoint が必要な場合のみ
+--formal-methods   guest 内へ Lean、Isabelle/HOL、Haskell tool、VS Code、
+                   公式 Lean/Haskell extension を追加する
 --replace-existing 指定した既存 VM を正確な名前の確認後に削除し、再作成する
 --finalize-existing
                    既存 VM の検証済み最終 cleanup を再開する
@@ -200,7 +236,8 @@ ollama --version
   --name agent-project-01 \
   --memory 16384 \
   --vcpus 8 \
-  --disk 120
+  --disk 120 \
+  --formal-methods
 ```
 
 VM 名には小文字英字、数字、ハイフンを使います。既定では既存の libvirt
@@ -221,7 +258,10 @@ Setup が update reboot 後に guest へ到達できなかったと報告して�
 Helper は reboot 前の address を信用せず、libvirt の DHCP lease を再取得します。
 Recovery key で `/var/lib/kvm-agent/provisioned` を確認するまで cloud-init や seed
 を変更せず、実行中・永続化済みの両 device configuration から管理対象 seed が
-外れたことを検証してから、その正確な seed file だけを削除します。
+外れたことを検証してから、その正確な seed file だけを削除します。SSH と
+cloud-init の確認では `cloud-init status --wait` を使わず、各 SSH 呼び出しに
+hard timeout を設定します。そのため、guest への接続後に remote command が
+停止しても helper が無期限に hang することはありません。
 `--no-wait` 後もこの helper が正式な完了手順です。
 
 ## VM を完全に削除する
@@ -301,6 +341,7 @@ image または pin 済み bundle に置き換えてください。
 - [日常運用](docs/daily-use_jp.md)
 - [認証情報の取り扱い](docs/credentials_jp.md)
 - [エージェントツールとモデルサービス](docs/agent-tools-and-model-services_jp.md)
+- [縮小形式手法環境](docs/formal-methods_jp.md)
 - [トラブルシューティング](docs/troubleshooting_jp.md)
 - [上流の一次資料](docs/references_jp.md)
 - [免責事項](DISCLAIMER_jp.md)

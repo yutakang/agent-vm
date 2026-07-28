@@ -24,6 +24,17 @@ Ubuntu cloud image, creates the VM, installs a minimal Ubuntu desktop, installs
 the five requested tools, and waits for the result. Day-to-day operation happens
 through the familiar `virt-manager` GUI.
 
+An opt-in reduced formal-methods environment is available:
+
+```bash
+./setup-kvm-agent.sh --formal-methods
+```
+
+It adds Lean 4, Isabelle/HOL, GHC, Cabal, Haskell Language Server, HLint,
+VS Code, and the official Lean and Haskell extensions inside the same
+graphical guest. It does not restore the older repository architecture or its
+larger prover collection.
+
 The same command can resume interrupted finalization or replace a disposable
 VM. A small removal helper remains available when removal without rebuilding
 is wanted:
@@ -48,8 +59,10 @@ flowchart TB
         D["GNOME desktop and terminal"]
         A["Codex · Claude Code · OpenCode · Aider"]
         O["Ollama on 127.0.0.1"]
+        F["Optional Lean · Isabelle/HOL · Haskell · VS Code"]
         D --> A
         D --> O
+        D --> F
     end
 
     P["Chosen remote provider or local model"]
@@ -80,10 +93,14 @@ From the ordinary Ubuntu host account, the script:
 7. downloads and runs the official Codex, Claude Code, OpenCode, and Ollama
    installers inside the guest, and installs Aider in a per-user `uv`
    environment; and
-8. before any vendor installer runs, configures a guest firewall that denies
+8. when `--formal-methods` is selected, installs Lean through `elan`,
+   Isabelle2025-2/HOL from its checksum-verified official Linux archive,
+   GHC/Cabal/HLS through GHCup, HLint through Cabal, and VS Code with the
+   official Lean and Haskell extensions;
+9. before any vendor installer runs, configures a guest firewall that denies
    unsolicited inbound traffic and, by default, outbound traffic to private
    and link-local address ranges, while leaving internet access open; and
-9. verifies each command, keeps Ollama bound to guest loopback
+10. verifies each command, keeps Ollama bound to guest loopback
    (`127.0.0.1:11434`), disables future cloud-init runs, and destroys the
    cloud-init seed once provisioning is done.
 
@@ -95,11 +112,11 @@ It deliberately does **not**:
 - mount the host home directory or a project directory in the guest;
 - configure USB passthrough, SSH-agent forwarding, or a LAN-facing VM console;
 - choose a model provider; or
-- install the former `formal_methods` profile.
+- install Agda, Rocq/OCaml, HOL4, HOL Light, Mathlib, or the Archive of Formal
+  Proofs.
 
-Formal-methods tools are project-specific and can be installed manually inside
-a VM that needs them. Users who only need an agent environment no longer pay
-their maintenance or provisioning cost.
+The reduced formal-methods environment remains optional, so users who only
+need an agent VM do not pay its download, disk, and provisioning cost.
 
 ## Requirements
 
@@ -113,7 +130,7 @@ The supported primary path is:
 | Host privilege | The invoking account can use `sudo` |
 | Network | Internet access during initial provisioning |
 | Display | Local graphical Ubuntu session for `virt-manager` |
-| Disk | At least 50 GiB free; 80 GiB or more recommended |
+| Disk | At least 50 GiB free; 80 GiB normally, 100–120 GiB recommended with `--formal-methods` |
 | Memory | 8 GiB guest recommended; keep at least 2 GiB for the host |
 
 The default memory is half of host RAM, clamped to 8–16 GiB. The default vCPU
@@ -141,7 +158,9 @@ autonomous without receiving host privilege.
 
 Initial provisioning commonly takes 20–60 minutes. Installing the desktop,
 upgrading Ubuntu, or reaching upstream download services may take longer on a
-slow machine. The terminal shows the current phase and waits by default.
+slow machine. With `--formal-methods`, the large Isabelle, Lean, GHC, HLS, and
+VS Code downloads plus the HLint build may take **several hours**. The host
+terminal waits by default and enforces a six-hour upper bound for that profile.
 
 When the script finishes, log out of the Ubuntu **host** and back in if it added
 your account to `libvirt` for the first time. Then run:
@@ -164,6 +183,22 @@ ollama --version
 Each coding agent performs its own first-run authentication or provider setup.
 Do that only after reading [Credential handling](docs/credentials.md).
 
+With `--formal-methods`, the same guest also supports:
+
+```bash
+code
+lean --version
+lake --version
+isabelle jedit
+ghc --version
+cabal --version
+haskell-language-server-wrapper --version
+hlint --version
+```
+
+See [Reduced formal-methods environment](docs/formal-methods.md) for the exact
+scope, editor behavior, and update model.
+
 ## Options
 
 ```text
@@ -176,6 +211,8 @@ Do that only after reading [Credential handling](docs/credentials.md).
 --allow-lan        Permit egress to private/link-local address ranges; UFW
                    remains enabled and continues to deny unsolicited inbound
                    traffic. Only for an internal mirror or model endpoint
+--formal-methods   Add Lean, Isabelle/HOL, Haskell tooling, VS Code, and the
+                   official Lean/Haskell extensions inside the guest
 --replace-existing Remove the selected existing VM after exact-name
                    confirmation, then build it again
 --finalize-existing
@@ -199,7 +236,8 @@ For example:
   --name agent-project-01 \
   --memory 16384 \
   --vcpus 8 \
-  --disk 120
+  --disk 120 \
+  --formal-methods
 ```
 
 VM names use lowercase letters, numbers, and hyphens. By default, the script
@@ -221,7 +259,10 @@ The helper re-queries libvirt DHCP leases instead of trusting the pre-reboot
 address. It verifies `/var/lib/kvm-agent/provisioned` through the recovery key
 before changing cloud-init or touching the seed, and verifies both the running
 and persistent device configurations before deleting the exact managed seed
-file. It is also the supported completion path after `--no-wait`.
+file. SSH and cloud-init checks are polled without `cloud-init status --wait`;
+each SSH invocation has a hard deadline, so a connected but blocked guest
+cannot make the helper hang indefinitely. It is also the supported completion
+path after `--no-wait`.
 
 ## Completely remove a VM
 
@@ -303,6 +344,7 @@ long-lived keys, production data, or expensive API credentials.
 - [Daily operation](docs/daily-use.md)
 - [Credential handling](docs/credentials.md)
 - [Agent tools and model services](docs/agent-tools-and-model-services.md)
+- [Reduced formal-methods environment](docs/formal-methods.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Primary upstream references](docs/references.md)
 - [Disclaimer](DISCLAIMER.md)

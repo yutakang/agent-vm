@@ -210,7 +210,10 @@ Application settings alone are not a network security boundary.
 
 The host installs only packages from Ubuntu's configured APT repositories. The
 guest then follows the current official installation channels for Codex, Claude
-Code, OpenCode, Aider dependencies, and Ollama.
+Code, OpenCode, Aider dependencies, and Ollama. With `--formal-methods`, the
+same rule applies to elan/Lean, GHCup/Haskell, HLint, VS Code, and its two
+extensions. Isabelle2025-2 is the exception: its selected archive is checked
+against a fixed reviewed SHA-256 value before extraction.
 
 This is intentionally simpler than the former signed offline bundle and exact
 lock files. The trade-off is important:

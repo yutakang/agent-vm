@@ -204,8 +204,10 @@ Typical causes:
 - an official installer changed its interface;
 - insufficient disk space or RAM;
 - a package-manager interruption;
-- DNS, proxy, or certificate problems; or
-- Aider dependency resolution failing for a newly released package.
+- DNS, proxy, or certificate problems;
+- Aider dependency resolution failing for a newly released package; or
+- with `--formal-methods`, a Lean, GHCup, Cabal/HLint, VS Code, extension, or
+  Isabelle download failure.
 
 The script installs credentials only after none—it does not add any. If
 provisioning failed in an otherwise empty VM, the cleanest response is usually
@@ -251,6 +253,8 @@ sudo journalctl -u gdm3 -b --no-pager -n 200
 
 The default target should be `graphical.target`. A black screen during the
 initial 20–60 minutes can simply mean the desktop is still being installed.
+With `--formal-methods`, the display manager deliberately starts only after the
+optional toolchains finish, so this phase can last several hours.
 
 In `virt-manager`, confirm the VM has a SPICE display, a virtio video device,
 and a SPICE channel. If these were manually changed, restore them while the VM
@@ -285,6 +289,30 @@ sudo cat /var/lib/kvm-agent/installed-versions.txt
 Open a new terminal so `/etc/profile.d/kvm-agent-tools.sh` and `~/.profile` are
 loaded. If cloud-init did not finish successfully, diagnose provisioning rather
 than installing credentials and continuing with an unknown partial state.
+
+## A formal-methods command or VS Code extension is missing
+
+This profile is installed only when VM creation used `--formal-methods`.
+Confirm the recorded result inside the guest:
+
+```bash
+sudo cat /var/lib/kvm-agent/installed-versions.txt
+printf '%s\n' "$PATH"
+code --list-extensions
+```
+
+Open a new terminal so `~/.profile` supplies `~/.elan/bin`, `~/.ghcup/bin`, and
+`~/.local/bin`. The expected extension identifiers are exactly:
+
+```text
+leanprover.lean4
+haskell.haskell
+```
+
+Isabelle is not one of those Marketplace extensions. Use `isabelle jedit`, or
+the separately bundled `isabelle vscode` environment. If initial provisioning
+failed, preserve the log and rebuild the credential-free guest; do not treat a
+partially installed toolchain as a successful profile.
 
 ## Ollama is unavailable or exposed too broadly
 
@@ -375,6 +403,9 @@ It re-discovers the address after reboot, verifies successful provisioning,
 creates and verifies the disable marker, detaches the exact seed from both the
 live and persistent configurations, and only then removes the file. If any
 inspection or verification fails, it retains the seed and reports an error.
+The provisioning check uses bounded, non-blocking SSH polls. If a remote check
+stops responding, that individual invocation is terminated and the helper
+continues retrying until its documented overall deadline.
 
 `shred` here means "remove, and attempt to overwrite first". On SSDs,
 copy-on-write filesystems, and layered storage it cannot guarantee the old

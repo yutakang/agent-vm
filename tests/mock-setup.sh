@@ -186,12 +186,22 @@ EOF
 cat > "$TEMP_DIR/bin/cloud-localds" <<'EOF'
 #!/usr/bin/env bash
 touch "$1"
+cp "$2" "$MOCK_STATE/user-data"
 EOF
 
 cat > "$TEMP_DIR/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 all_arguments="$*"
-if [[ "$all_arguments" == *"cloud-init status --wait"* \
+if [[ "$all_arguments" == *"/var/lib/kvm-agent/provisioning-failed"* \
+    && -f "$MOCK_STATE/provisioning-failed" ]]; then
+  exit 42
+fi
+if [[ "$all_arguments" == *"/var/lib/kvm-agent/provisioned"* \
+    && -f "$MOCK_STATE/ssh-hang" ]]; then
+  sleep 60
+  exit 1
+fi
+if [[ "$all_arguments" == *"cloud-init status 2>/dev/null"* \
     && -f "$MOCK_STATE/provisioning-failed" ]]; then
   exit 1
 fi
@@ -213,6 +223,10 @@ fi
 if [[ "$all_arguments" == *"installed-versions.txt"* ]]; then
   cat <<'OUTPUT'
 Provisioned: 2026-07-28T00:00:00+00:00
+Visual Studio Code mock
+Lean mock
+Isabelle2025-2 mock
+GHC mock
 codex-cli mock
 claude mock
 opencode mock
@@ -278,10 +292,13 @@ printf 'mockpass123\nmockpass123\n' \
   | env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
     "$TEMP_DIR/setup-under-test.sh" \
       --name mock-agent --memory 8192 --vcpus 2 --disk 80 \
+      --formal-methods \
       > "$TEMP_DIR/output"
 
 grep -Fq "KVM-Agent setup completed" "$TEMP_DIR/output"
 grep -Fq "codex-cli mock" "$TEMP_DIR/output"
+grep -Fq "Formal tools:   Lean 4, Isabelle/HOL, GHC, Cabal, HLS, HLint" \
+  "$TEMP_DIR/output"
 grep -Fq "virt-manager --connect qemu:///system" "$TEMP_DIR/output"
 grep -Fq "192.168.122.51" "$TEMP_DIR/output"
 [[ -f "$MOCK_STATE/domain-defined" ]]
@@ -291,6 +308,11 @@ grep -Fq "192.168.122.51" "$TEMP_DIR/output"
 [[ -f "$MOCK_STATE/cloud-init-disabled" ]]
 [[ ! -e "$TEMP_DIR/images/vms/mock-agent-seed.img" ]]
 [[ -f "$TEMP_DIR/home/.local/share/kvm-agent/mock-agent/id_ed25519" ]]
+grep -Fxq "formal-methods=yes" \
+  "$TEMP_DIR/home/.local/share/kvm-agent/mock-agent/provisioning-mode"
+grep -Fq \
+  '["/usr/local/sbin/kvm-agent-provision", "agent", "yes", "192.168.122.1", "yes"]' \
+  "$MOCK_STATE/user-data"
 
 env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
   "$TEMP_DIR/setup-under-test.sh" \
@@ -300,6 +322,30 @@ grep -Fq "KVM-Agent finalization completed" \
   "$TEMP_DIR/finalize-output"
 grep -Fq "192.168.122.51" "$TEMP_DIR/finalize-output"
 
+# A connected SSH session whose remote command never returns must still be
+# bounded. This reproduces the v8 cloud-init status --wait hang without making
+# the regression suite itself wait indefinitely.
+cp "$TEMP_DIR/setup-under-test.sh" "$TEMP_DIR/setup-hang-under-test.sh"
+sed -i \
+  -e 's/readonly SSH_COMMAND_TIMEOUT_SECONDS=20/readonly SSH_COMMAND_TIMEOUT_SECONDS=1/' \
+  -e 's/local provisioning_attempts=1080/local provisioning_attempts=1/' \
+  -e 's/provisioning_attempts=4320/provisioning_attempts=1/' \
+  "$TEMP_DIR/setup-hang-under-test.sh"
+touch \
+  "$MOCK_STATE/ssh-hang" \
+  "$TEMP_DIR/images/vms/mock-agent-seed.img"
+if timeout 8s env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
+    "$TEMP_DIR/setup-hang-under-test.sh" \
+      --finalize-existing --name mock-agent --user agent \
+      > "$TEMP_DIR/finalize-hang-output" 2>&1; then
+  echo "Finalization unexpectedly accepted a blocked SSH probe." >&2
+  exit 1
+fi
+grep -Fq "stopped without changing cloud-init" \
+  "$TEMP_DIR/finalize-hang-output"
+[[ -f "$TEMP_DIR/images/vms/mock-agent-seed.img" ]]
+rm -f -- "$MOCK_STATE/ssh-hang"
+
 # If successful provisioning cannot be verified, recovery must not disable
 # cloud-init or detach/delete the seed. Shorten the retry loop in this mock.
 rm -f -- \
@@ -308,7 +354,9 @@ rm -f -- \
 touch \
   "$MOCK_STATE/provisioning-failed" \
   "$TEMP_DIR/images/vms/mock-agent-seed.img"
-sed -i 's/wait_for_guest_ssh 240/wait_for_guest_ssh 1/' \
+sed -i \
+  -e 's/local provisioning_attempts=1080/local provisioning_attempts=1/' \
+  -e 's/provisioning_attempts=4320/provisioning_attempts=1/' \
   "$TEMP_DIR/setup-under-test.sh"
 if env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
     "$TEMP_DIR/setup-under-test.sh" \

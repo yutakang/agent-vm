@@ -33,8 +33,11 @@ sequenceDiagram
     S->>S: Ubuntu 署名済み image manifest を検証
     S->>L: GUI 付き VM を定義
     L->>G: NoCloud seed で cloud image を起動
-    G->>P: 現行公式 agent release を取得
-    G->>G: Desktop と五つの tool を導入
+    G->>P: 現行公式 tool release を取得
+    G->>G: Desktop と五つの agent tool を導入
+    opt --formal-methods
+        G->>G: 縮小形式手法環境と editor を導入
+    end
     S->>G: 復旧 SSH で待機・検証
     S->>G: 将来の cloud-init 実行を無効化
     S->>L: NoCloud seed を detach・削除
@@ -61,7 +64,9 @@ IP address は安定した VM identity ではないため、reboot 後の待機�
 DHCP lease を再取得します。Host 側の待機が中断した場合は、
 `setup-kvm-agent.sh --finalize-existing` が同じ内部処理を使い、working VM を
 作り直さずに marker 検証、cloud-init 無効化、fail-closed な seed detach を
-再実行します。
+再実行します。Provisioning 完了は短い non-blocking poll で確認し、各 recovery
+SSH 呼び出しにも host 側 timeout を設定します。したがって SSH session や
+remote cloud-init command が停止しても、全体の retry limit を無効化できません。
 
 ## なぜ system libvirt か
 
@@ -156,11 +161,16 @@ Codex、Claude Code、OpenCode、Ollama は現在の公式 native installer chan
 Script は各 CLI が version を返すこと、Ollama が guest loopback だけで応答することを
 確認します。
 
+任意の `--formal-methods` branch は、復活した provisioning subsystem ではなく、
+同じ埋め込み guest program の一部です。Lean/elan、Isabelle2025-2/HOL、
+GHCup/GHC/Cabal/HLS/HLint、guest-side VS Code、公式 Lean/Haskell extension だけを
+追加します。Isabelle archive には固定の review 済み checksum を使い、他 tool は
+現在の公式 channel に従います。
+
 これは release-channel の再現性であり、byte-level の再現性ではありません。通常設定を
-小さく保守可能にするため、以前の厳密 pin、package lock、署名済み offline ISO 経路、
-formal-methods toolchain を除去しました。組織的 artifact review が必要な場合は、この
-個人向け便利経路を supply-chain 保証と見なさず、内部署名済み golden image を作って
-ください。
+小さく保守可能にするため、以前の包括的 profile、package lock、署名済み offline ISO
+経路を除去しました。組織的 artifact review が必要な場合は、この個人向け便利経路を
+supply-chain 保証と見なさず、内部署名済み golden image を作ってください。
 
 ## 意図的に除外した機能
 
@@ -169,7 +179,7 @@ formal-methods toolchain を除去しました。組織的 artifact review が�
 - Host/guest shared inbox。
 - GitHub fork/deploy-key の自動設定。
 - Host への VS Code 自動導入。
-- Formal-methods profile。
+- 単一の縮小 opt-in set を超える包括的・選択式 formal-methods profile。
 - Host で強制される network policy。private network の遮断は guest firewall であり、libvirt `nwfilter` ではありません。
 - GPU/USB passthrough。
 - VM の自動破棄。

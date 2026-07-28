@@ -196,6 +196,8 @@ sudo less /var/log/cloud-init-output.log
 - Package manager interruption。
 - DNS、proxy、certificate 問題。
 - 新 release package による Aider dependency resolution failure。
+- `--formal-methods` 利用時の Lean、GHCup、Cabal/HLint、VS Code、extension、
+  Isabelle download failure。
 
 Script は credential を追加しません。空の VM 内で provisioning に失敗した場合は、
 log を保存し、失敗 guest を削除し、原因を直して新 VM を作るのが通常最も clean です。
@@ -237,7 +239,8 @@ sudo journalctl -u gdm3 -b --no-pager -n 200
 ```
 
 Default target は `graphical.target` です。初回 20～60 分の black screen は単に
-desktop 導入中の場合があります。
+desktop 導入中の場合があります。`--formal-methods` では任意 toolchain が完了する
+まで display manager を意図的に起動しないため、この段階が数時間続く場合があります。
 
 `virt-manager` で SPICE display、virtio video device、SPICE channel を確認します。
 手作業で変更した場合は VM shutdown 中に戻します。
@@ -268,6 +271,30 @@ sudo cat /var/lib/kvm-agent/installed-versions.txt
 新 terminal を開き、`/etc/profile.d/kvm-agent-tools.sh` と `~/.profile` を load
 します。Cloud-init が成功していない場合は、credential を追加して不明な partial
 state を使い続けず、provisioning を診断します。
+
+## 形式手法 command または VS Code extension が見つからない
+
+この profile は VM 作成時に `--formal-methods` を指定した場合だけ導入されます。
+Guest 内で記録結果を確認します。
+
+```bash
+sudo cat /var/lib/kvm-agent/installed-versions.txt
+printf '%s\n' "$PATH"
+code --list-extensions
+```
+
+新しい terminal を開き、`~/.profile` から `~/.elan/bin`、`~/.ghcup/bin`、
+`~/.local/bin` を読み込みます。期待する extension identifier は正確に次の二つです。
+
+```text
+leanprover.lean4
+haskell.haskell
+```
+
+Isabelle はこの Marketplace extension の一つではありません。`isabelle jedit`、
+または別に bundled された `isabelle vscode` environment を使います。初回
+provisioning が失敗した場合は log を保存し、credential-free guest を再作成します。
+部分導入 toolchain を成功 profile として扱わないでください。
 
 ## Ollama が使えない／広く公開された
 
@@ -352,6 +379,9 @@ Helper は reboot 後の address を再検出し、provisioning 成功を検証�
 marker を作成・確認します。その後、実行中・永続化済みの両 configuration から正確な
 seed を detach し、それを確認できた場合だけ file を削除します。検査や検証に
 失敗した場合は seed を残して error を報告します。
+Provisioning の確認には timeout 付きの non-blocking SSH poll を使います。
+Remote check が応答しなくなった場合、その SSH 呼び出しだけを終了し、文書化された
+全体 deadline まで再試行します。
 
 ここでの `shred` は「削除し、その前に上書きを試みる」という意味です。SSD、
 copy-on-write filesystem、階層化された storage では、古い block が消えたことを保証

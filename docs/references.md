@@ -31,6 +31,24 @@ Last reviewed: 2026-07-28.
 These are the installation origins used by `setup-kvm-agent.sh`. The script
 downloads them from inside the guest.
 
+## Optional formal-methods and editor environment
+
+- [Lean installation](https://lean-lang.org/install/)
+- [elan: Lean version manager](https://github.com/leanprover/elan)
+- [Lean 4 VS Code extension](https://marketplace.visualstudio.com/items?itemName=leanprover.lean4)
+- [Isabelle current release](https://isabelle.in.tum.de/)
+- [Isabelle installation](https://isabelle.in.tum.de/installation.html)
+- [Isabelle2025-2 NEWS](https://www.cl.cam.ac.uk/research/hvg/Isabelle/dist/Isabelle2025-2/doc/NEWS.html)
+- [GHCup installation](https://www.haskell.org/ghcup/install/)
+- [GHCup user guide](https://www.haskell.org/ghcup/guide/)
+- [Haskell VS Code extension](https://marketplace.visualstudio.com/items?itemName=haskell.haskell)
+- [Visual Studio Code on Linux](https://code.visualstudio.com/docs/setup/linux)
+
+The reduced profile follows current official channels for Lean, Haskell, VS
+Code, and extensions. Isabelle2025-2 is selected explicitly and its official
+Linux archive is checksum-verified. See
+[Reduced formal-methods environment](formal-methods.md).
+
 ## Provider configuration
 
 - [Codex configuration](https://developers.openai.com/codex/config-reference)
@@ -49,4 +67,3 @@ agentic workflow.
 An upstream link supports only the nearby technical statement. It does not mean
 that Ubuntu, OpenAI, Anthropic, OpenCode, Aider, Ollama, or another linked
 organization endorses this repository or its security analysis.
-
