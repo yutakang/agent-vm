@@ -130,7 +130,7 @@ The supported primary path is:
 | Host privilege | The invoking account can use `sudo` |
 | Network | Internet access during initial provisioning |
 | Display | Local graphical Ubuntu session for `virt-manager` |
-| Disk | At least 50 GiB free; 80 GiB normally, 100–120 GiB recommended with `--formal-methods` |
+| Disk | 120 GiB guest virtual disk by default; at least 12 GiB free on the host, or 30 GiB with `--formal-methods` |
 | Memory | 8 GiB guest recommended; keep at least 2 GiB for the host |
 
 The default memory is half of host RAM, clamped to 8–16 GiB. The default vCPU
@@ -206,7 +206,7 @@ scope, editor behavior, and update model.
 --user NAME        Guest login name (default: agent)
 --memory MB        Guest RAM in MiB
 --vcpus NUMBER     Guest virtual CPUs
---disk GB          Guest virtual disk size (default: 80)
+--disk GB          Guest virtual disk size (default: 120)
 --no-wait          Return after starting the VM
 --allow-lan        Permit egress to private/link-local address ranges; UFW
                    remains enabled and continues to deny unsolicited inbound
@@ -218,6 +218,15 @@ scope, editor behavior, and update model.
 --finalize-existing
                    Resume verified final cleanup of an existing VM
 ```
+
+The 120 GiB default is a guest-visible maximum, not 120 GiB allocated
+immediately on the host: qcow2 grows as the guest writes data. Before any
+large installation, setup explicitly grows and verifies the root partition
+and filesystem. It also keeps 512 MiB of emergency space during provisioning
+so a failed download or package build can release that space instead of
+leaving the graphical login unusable. The host must have at least 12 GiB free
+for the base profile or 30 GiB for `--formal-methods`; setup checks this before
+`--replace-existing` removes the old VM.
 
 `--no-wait` returns before provisioning finishes, so it cannot immediately
 remove the cloud-init seed or disable future cloud-init runs. Complete those
@@ -236,7 +245,6 @@ For example:
   --name agent-project-01 \
   --memory 16384 \
   --vcpus 8 \
-  --disk 120 \
   --formal-methods
 ```
 

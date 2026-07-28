@@ -14,7 +14,6 @@ For a new VM:
 ```bash
 ./setup-kvm-agent.sh \
   --name kvm-agent \
-  --disk 120 \
   --formal-methods
 ```
 
@@ -24,7 +23,6 @@ To discard an existing disposable VM and rebuild it with the profile:
 ./setup-kvm-agent.sh \
   --replace-existing \
   --name kvm-agent \
-  --disk 120 \
   --formal-methods
 ```
 
@@ -59,9 +57,17 @@ Isabelle, Lean, GHC, HLS, and VS Code downloads are followed by a Cabal build
 of HLint. Eight GiB of guest RAM is adequate for installation and small work;
 16 GiB is preferable for larger Isabelle sessions or parallel builds.
 
-The 80 GiB default disk can hold the base tools, but 100–120 GiB is recommended
-for project-specific Lean packages, Haskell build stores, Isabelle sessions,
-and agent workspaces. Mathlib and AFP are not downloaded automatically.
+The 120 GiB default leaves substantial headroom for project-specific Lean
+packages, Haskell build stores, Isabelle sessions, and agent workspaces.
+Ordinary Isabelle/HOL, Lean, and Haskell work with the reduced profile normally
+needs much less than 120 GiB; Mathlib, AFP, large model weights, and project
+datasets are not downloaded automatically.
+
+The disk is thin-provisioned locally. Setup verifies at least 30 GiB of free
+host backing space before replacing an existing formal-methods VM, then grows
+and checks the guest root filesystem before package installation. This check
+prevents a nominally 120 GiB qcow2 device from silently retaining the small
+root filesystem of the source cloud image.
 
 The host-side wait is bounded at six hours for this profile. If `--no-wait`
 was used or the terminal was interrupted, finish through the same setup

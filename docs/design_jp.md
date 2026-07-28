@@ -68,6 +68,29 @@ DHCP lease を再取得します。Host 側の待機が中断した場合は、
 SSH 呼び出しにも host 側 timeout を設定します。したがって SSH session や
 remote cloud-init command が停止しても、全体の retry limit を無効化できません。
 
+## Disk 容量と将来の cloud adapter
+
+Local の既定は 120 GiB です。GUI 開発 guest、形式手法 toolchain、build product、
+agent workspace に余裕を持たせた値です。qcow2 image は thin provisioning のため、
+host 上で直ちに 120 GiB を予約しません。ただし setup は host backing storage の
+最低空き容量を確認し、qcow2 の virtual size を検証し、Ubuntu の root partition と
+filesystem を明示的に拡張します。さらに `/` が要求容量の 90% 以上を公開するまで、
+大容量 package 導入を開始しません。
+
+将来の provider adapter すべてに同じ数値を固定すべきではありません。
+
+- AWS EBS gp3 では 120 GiB volume を作れますが、guest が書き込んだ block 数ではなく
+  provision した容量に対して課金されます。
+- さくらのクラウドは固定 disk plan を公開しており、文書化された選択肢には
+  120 GB ではなく 100 GB と 250 GB があります。
+
+したがって将来の AWS・さくら実装では、guest provisioning payload と容量検証は
+共有しつつ、VM、network、storage、cleanup は provider 固有 adapter に分けるべきです。
+さくらの 100 GB disk でも通常はこの縮小 theorem-proving profile を収容できます。
+Project、model weight、dataset により追加容量が必要なら、次の文書化済み plan は
+250 GB です。Provider adapter は、すべての backend が 120 GiB を提供したと仮定せず、
+実際に provision した容量を guest の検証処理へ渡す必要があります。
+
 ## なぜ system libvirt か
 
 Script は、通常 `virt-manager` に表示されるのと同じ `qemu:///system` 接続を使います。

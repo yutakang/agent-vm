@@ -178,6 +178,35 @@ ssh-keygen -R VM_ADDRESS \
 
 Global に host-key checking を無効化してはいけません。
 
+## Provisioning が容量不足を報告する、または GUI login loop になる
+
+Root 容量検証の修正前は、qcow2 device を拡大しても、desktop と toolchain の
+導入前に Ubuntu の `/` が拡大済みかを検証していませんでした。そのため host 上の
+qcow2 file が数 GiB しか占有していないのに、source image の小さな filesystem が
+一杯になる可能性がありました。
+
+現在の setup は利用可能な root 容量を必須条件として扱います。
+
+- cloud-init に partition・filesystem 拡張を明示する。
+- 標準 Ubuntu cloud-image partition の拡張を安全に再試行する。
+- `/` が `--disk` の 90% 以上になるまで package 導入を開始しない。
+- 旧 VM を削除する前に host backing storage の空きを検査する。
+- 大きな provisioning 段階の前に guest の空きを再検査する。
+- 失敗時に自動解放する 512 MiB を確保する。
+
+Credential をまだ入れていない失敗 guest は、修正版 repository で再作成します。
+
+```bash
+./setup-kvm-agent.sh \
+  --replace-existing \
+  --name kvm-agent \
+  --formal-methods
+```
+
+既定 120 GiB は thin provisioning であり、直ちに host 上の 120 GiB を消費する
+わけではありません。qcow2 file に対する `du` から guest filesystem 容量を
+推定しないでください。
+
 ## Cloud-init error
 
 実際に失敗した command を確認します。

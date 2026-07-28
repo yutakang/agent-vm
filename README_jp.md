@@ -130,7 +130,7 @@ download、disk、provisioning 費用を負いません。
 | ホスト権限 | 実行アカウントが `sudo` を利用可能 |
 | ネットワーク | 初回プロビジョニング中にインターネット接続 |
 | 表示 | `virt-manager` 用のローカル GUI Ubuntu セッション |
-| ディスク | 50 GiB 以上の空き。通常は 80 GiB、`--formal-methods` では 100～120 GiB を推奨 |
+| ディスク | Guest 仮想 disk は既定 120 GiB。Host 空きは最低 12 GiB、`--formal-methods` では 30 GiB |
 | メモリ | ゲスト 8 GiB を推奨。ホストへ 2 GiB 以上残す |
 
 既定メモリはホスト RAM の半分を 8～16 GiB の範囲に収めた値です。既定
@@ -207,7 +207,7 @@ hlint --version
 --user NAME        ゲストのログイン名（既定: agent）
 --memory MB        ゲスト RAM（MiB）
 --vcpus NUMBER     ゲスト仮想 CPU 数
---disk GB          ゲスト仮想ディスク容量（既定: 80）
+--disk GB          ゲスト仮想ディスク容量（既定: 120）
 --no-wait          VM 起動後、完了を待たずに戻る
 --allow-lan        private・link-local address range への外向き通信を許可する。
                    UFW は有効なままで、未要求の inbound 通信は引き続き拒否する。
@@ -218,6 +218,15 @@ hlint --version
 --finalize-existing
                    既存 VM の検証済み最終 cleanup を再開する
 ```
+
+既定の 120 GiB は guest から見える上限であり、host 上で直ちに 120 GiB を
+確保する意味ではありません。qcow2 は guest の書き込みに応じて増えます。
+大容量導入の前に setup は root partition と filesystem を明示的に拡張し、
+要求容量を使えることを検証します。また provisioning 中は 512 MiB の緊急用
+空き領域を確保し、download や package build の失敗時にはそれを解放して、
+容量不足で GUI login まで不能になる事態を避けます。Host には基本 profile で
+最低 12 GiB、`--formal-methods` で最低 30 GiB の空きが必要であり、
+`--replace-existing` が旧 VM を削除する前に確認します。
 
 `--no-wait` は provisioning 完了前に戻るため、その時点では cloud-init seed の
 削除や将来の cloud-init 実行の無効化はできません。後で repository の helper を
@@ -236,7 +245,6 @@ hlint --version
   --name agent-project-01 \
   --memory 16384 \
   --vcpus 8 \
-  --disk 120 \
   --formal-methods
 ```
 

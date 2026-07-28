@@ -188,6 +188,35 @@ ssh-keygen -R VM_ADDRESS \
 
 Never disable host-key checking globally.
 
+## Provisioning reports no space or the graphical login loops
+
+Releases before the root-capacity fix enlarged the qcow2 device but did not
+verify that Ubuntu had enlarged `/` before installing the desktop and
+toolchains. A small source-image filesystem could therefore fill while the
+qcow2 file itself still occupied only a few GiB on the host.
+
+The current setup treats usable root capacity as a required invariant. It:
+
+- requests cloud-init partition and filesystem growth;
+- safely retries growth for the standard Ubuntu cloud-image partition;
+- refuses package installation unless `/` is at least 90% of `--disk`;
+- checks free host backing space before deleting an old VM;
+- checks guest free space again before large provisioning stages; and
+- reserves 512 MiB that is released automatically on failure.
+
+For a credential-free failed guest, use the corrected repository and rebuild:
+
+```bash
+./setup-kvm-agent.sh \
+  --replace-existing \
+  --name kvm-agent \
+  --formal-methods
+```
+
+The 120 GiB default is thin-provisioned and normally does not consume 120 GiB
+on the host immediately. Do not infer the guest filesystem size from
+`du` on the qcow2 file.
+
 ## Cloud-init reports an error
 
 Get the actual failing command:

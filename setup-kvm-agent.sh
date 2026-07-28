@@ -18,12 +18,13 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly IMAGE_DIR="/var/lib/libvirt/images/kvm-agent"
 readonly VM_IMAGE_DIR="${IMAGE_DIR}/vms"
 readonly SSH_COMMAND_TIMEOUT_SECONDS=20
+readonly DEFAULT_DISK_GB=120
 
 VM_NAME="kvm-agent"
 GUEST_USER="agent"
 RAM_MB=""
 VCPUS=""
-DISK_GB="80"
+DISK_GB="$DEFAULT_DISK_GB"
 WAIT_FOR_GUEST="yes"
 RESTRICT_PRIVATE_NETWORKS="yes"
 GATEWAY_ADDRESS=""
@@ -49,7 +50,7 @@ Options:
   --user NAME        Guest login name (default: agent)
   --memory MB        Guest RAM in MiB (default: half of host RAM, 8-16 GiB)
   --vcpus NUMBER     Guest virtual CPUs (default: half of host CPUs, 2-8)
-  --disk GB          Guest virtual disk size (default: 80)
+  --disk GB          Guest virtual disk size (default: 120)
   --no-wait          Start provisioning but do not wait for it to finish
   --allow-lan        Permit guest egress to private and link-local address
                      ranges. The firewall remains enabled and still denies
@@ -446,7 +447,8 @@ done
 if [[ "$OPERATION" == "finalize" ]]; then
   [[ "$REPLACE_EXISTING" == "no" ]] || die \
     "--finalize-existing and --replace-existing cannot be used together."
-  [[ -z "$RAM_MB" && -z "$VCPUS" && "$DISK_GB" == "80" \
+  [[ -z "$RAM_MB" && -z "$VCPUS" \
+      && "$DISK_GB" == "$DEFAULT_DISK_GB" \
       && "$WAIT_FOR_GUEST" == "yes" \
       && "$RESTRICT_PRIVATE_NETWORKS" == "yes" \
       && "$WITH_FORMAL_METHODS" == "no" ]] || die \
@@ -521,11 +523,11 @@ positive_integer "$VCPUS" || die "--vcpus must be a positive integer."
 if ((RAM_MB < 8192)); then
   warn "Less than 8 GiB may make desktop provisioning and agent use slow."
 fi
-if ((DISK_GB < 80)); then
-  warn "Less than 80 GiB leaves limited room for model weights and projects."
+if ((DISK_GB < 120)); then
+  warn "Less than 120 GiB leaves less room for toolchains, model weights, and projects."
 fi
 if [[ "$WITH_FORMAL_METHODS" == "yes" && "$DISK_GB" -lt 100 ]]; then
-  warn "The formal-methods toolchains fit in 80 GiB, but 100-120 GiB is preferable for project dependencies and build products."
+  warn "Less than 100 GiB is not recommended for the formal-methods profile."
 fi
 
 log "Configuration"
@@ -626,6 +628,30 @@ GATEWAY_ADDRESS="$(
 [[ "$GATEWAY_ADDRESS" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die \
   "Could not determine the IPv4 gateway of libvirt network '$LIBVIRT_NETWORK'."
 
+# qcow2 is thin-provisioned: DISK_GB is the guest-visible ceiling, not space
+# reserved on the host. Refuse to destroy an existing guest when the backing
+# filesystem is already too small for a credible provisioning run. This is a
+# safety floor, not a promise that every future workload will fit.
+sudo install -d -o root -g kvm -m 0750 "$IMAGE_DIR" "$VM_IMAGE_DIR"
+host_available_bytes="$(
+  LC_ALL=C df -PB1 "$IMAGE_DIR" \
+    | awk 'NR == 2 { print $4 }'
+)"
+positive_integer "$host_available_bytes" || die \
+  "Could not determine free space for $IMAGE_DIR."
+minimum_host_free_gib=12
+if [[ "$WITH_FORMAL_METHODS" == "yes" ]]; then
+  minimum_host_free_gib=30
+fi
+minimum_host_free_bytes=$((minimum_host_free_gib * 1024 * 1024 * 1024))
+if ((host_available_bytes < minimum_host_free_bytes)); then
+  die "The host filesystem backing $IMAGE_DIR has less than ${minimum_host_free_gib} GiB free. No existing VM was removed."
+fi
+requested_disk_bytes=$((DISK_GB * 1024 * 1024 * 1024))
+if ((host_available_bytes < requested_disk_bytes)); then
+  warn "The ${DISK_GB} GiB qcow2 disk is thin-provisioned, but the host currently has only $((host_available_bytes / 1024 / 1024 / 1024)) GiB free. The VM cannot consume its full virtual capacity unless host space is added."
+fi
+
 if [[ "$REPLACE_EXISTING" == "yes" ]]; then
   log "Replacing the existing KVM-Agent VM"
   printf 'The removal helper will show the exact VM-specific files and require\n'
@@ -645,7 +671,6 @@ readonly BASE_IMAGE="${IMAGE_DIR}/${IMAGE_NAME}"
 readonly BASE_CHECKSUM="${BASE_IMAGE}.sha256"
 readonly UBUNTU_CLOUD_KEYRING="/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg"
 
-sudo install -d -o root -g kvm -m 0750 "$IMAGE_DIR" "$VM_IMAGE_DIR"
 [[ -r "$UBUNTU_CLOUD_KEYRING" ]] || die \
   "Ubuntu cloud-image keyring is missing after installing ubuntu-keyring."
 
@@ -758,6 +783,7 @@ guest_user="${1:?guest user is required}"
 restrict_private_networks="${2:?private-network policy is required}"
 gateway_address="${3:?gateway address is required}"
 with_formal_methods="${4:?formal-methods selection is required}"
+requested_disk_gib="${5:?requested disk size is required}"
 guest_home="$(getent passwd "$guest_user" | awk -F: '{print $6}')"
 guest_group="$(id -gn "$guest_user")"
 guest_path="${guest_home}/.elan/bin:${guest_home}/.ghcup/bin:${guest_home}/.local/bin:${guest_home}/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -775,10 +801,17 @@ install -d -o root -g root -m 0755 /var/lib/kvm-agent
 rm -f -- \
   /var/lib/kvm-agent/provisioned \
   /var/lib/kvm-agent/provisioning-failed
+emergency_reserve="/var/lib/kvm-agent/emergency-space.reserve"
 record_provisioning_failure() {
   local exit_status=$?
   trap - EXIT
   if ((exit_status != 0)); then
+    # Keep a failed provisioning run from leaving / completely full and
+    # causing a graphical login loop. The reserve is allocated before large
+    # downloads and released first on failure.
+    rm -f -- "$emergency_reserve"
+    apt-get clean >/dev/null 2>&1 || true
+    rm -rf -- /var/cache/apt/archives/partial/* 2>/dev/null || true
     printf 'Provisioning failed: %s\n' "$(date --utc --iso-8601=seconds)" \
       > /var/lib/kvm-agent/provisioning-failed
     chmod 0644 /var/lib/kvm-agent/provisioning-failed
@@ -786,6 +819,136 @@ record_provisioning_failure() {
   exit "$exit_status"
 }
 trap record_provisioning_failure EXIT
+
+root_filesystem_bytes() {
+  LC_ALL=C df -B1 --output=size / | awk 'NR == 2 { print $1 }'
+}
+
+root_available_bytes() {
+  LC_ALL=C df -B1 --output=avail / | awk 'NR == 2 { print $1 }'
+}
+
+show_root_storage() {
+  echo "Guest block devices:"
+  lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS
+  echo "Guest root filesystem:"
+  df -h /
+}
+
+grow_root_filesystem() {
+  local root_source
+  local root_device
+  local parent_name
+  local parent_device
+  local partition_number
+  local filesystem_type
+  local growpart_output=""
+
+  root_source="$(findmnt -n -o SOURCE /)"
+  root_device="$(readlink -f -- "$root_source")"
+  [[ -b "$root_device" ]] || {
+    echo "Root source is not a block device: $root_source -> $root_device" >&2
+    return 1
+  }
+
+  parent_name="$(lsblk -ndo PKNAME "$root_device" | head -n 1)"
+  partition_number="$(lsblk -ndo PARTN "$root_device" | head -n 1)"
+  [[ -n "$parent_name" && "$partition_number" =~ ^[1-9][0-9]*$ ]] || {
+    echo "Cannot identify the parent disk and partition for $root_device." >&2
+    return 1
+  }
+  parent_device="/dev/${parent_name}"
+
+  command -v growpart >/dev/null || {
+    echo "growpart is missing from the Ubuntu cloud image." >&2
+    return 1
+  }
+
+  echo "Expanding root partition ${parent_device} ${partition_number}..."
+  if ! growpart_output="$(growpart "$parent_device" "$partition_number" 2>&1)"; then
+    # growpart returns nonzero for an already-maximal partition on some
+    # releases. That is safe because the filesystem resize and size
+    # verification below remain mandatory.
+    grep -Fq "NOCHANGE" <<< "$growpart_output" || {
+      printf '%s\n' "$growpart_output" >&2
+      return 1
+    }
+  fi
+  [[ -z "$growpart_output" ]] || printf '%s\n' "$growpart_output"
+  udevadm settle || true
+
+  filesystem_type="$(findmnt -n -o FSTYPE /)"
+  case "$filesystem_type" in
+    ext2|ext3|ext4)
+      resize2fs "$root_device"
+      ;;
+    xfs)
+      xfs_growfs /
+      ;;
+    btrfs)
+      btrfs filesystem resize max /
+      ;;
+    *)
+      echo "Unsupported root filesystem for automatic growth: $filesystem_type" >&2
+      return 1
+      ;;
+  esac
+}
+
+ensure_requested_root_capacity() {
+  local current_bytes
+  local minimum_bytes
+
+  [[ "$requested_disk_gib" =~ ^[1-9][0-9]*$ ]] || {
+    echo "Invalid requested disk size: $requested_disk_gib" >&2
+    return 1
+  }
+  minimum_bytes=$((requested_disk_gib * 1024 * 1024 * 1024 * 9 / 10))
+  current_bytes="$(root_filesystem_bytes)"
+
+  if [[ ! "$current_bytes" =~ ^[1-9][0-9]*$ ]] \
+      || ((current_bytes < minimum_bytes)); then
+    echo "Root filesystem has not yet expanded to the requested ${requested_disk_gib} GiB disk."
+    show_root_storage
+    grow_root_filesystem
+    current_bytes="$(root_filesystem_bytes)"
+  fi
+
+  if [[ ! "$current_bytes" =~ ^[1-9][0-9]*$ ]] \
+      || ((current_bytes < minimum_bytes)); then
+    show_root_storage
+    echo "Root filesystem is smaller than 90% of the requested ${requested_disk_gib} GiB. Refusing large package installation." >&2
+    return 1
+  fi
+
+  echo "Verified root filesystem capacity: $((current_bytes / 1024 / 1024 / 1024)) GiB usable."
+}
+
+require_root_free_gib() {
+  local required_gib="$1"
+  local available_bytes
+  local required_bytes=$((required_gib * 1024 * 1024 * 1024))
+
+  available_bytes="$(root_available_bytes)"
+  if [[ ! "$available_bytes" =~ ^[0-9]+$ ]] \
+      || ((available_bytes < required_bytes)); then
+    show_root_storage
+    echo "At least ${required_gib} GiB free on / is required before the next provisioning stage." >&2
+    return 1
+  fi
+}
+
+# Cloud-init normally grows Ubuntu cloud images before runcmd. Repeat the
+# operation safely when needed and verify the result before any large download.
+ensure_requested_root_capacity
+initial_free_gib=10
+if [[ "$with_formal_methods" == "yes" ]]; then
+  initial_free_gib=25
+fi
+require_root_free_gib "$initial_free_gib"
+rm -f -- "$emergency_reserve"
+fallocate -l 512M "$emergency_reserve"
+chmod 0600 "$emergency_reserve"
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
@@ -811,6 +974,7 @@ apt-get install -y \
   python3 \
   python3-venv \
   ufw
+apt-get clean
 
 if [[ "$with_formal_methods" == "yes" ]]; then
   echo "Installing Ubuntu prerequisites for Lean, Isabelle and Haskell..."
@@ -825,6 +989,7 @@ if [[ "$with_formal_methods" == "yes" ]]; then
     pkg-config \
     wget \
     xz-utils
+  apt-get clean
 fi
 
 systemctl enable --now qemu-guest-agent.service
@@ -987,6 +1152,7 @@ install_formal_methods() {
   rm -f -- "$isabelle_archive"
 
   echo "Installing GHC, Cabal and Haskell Language Server through GHCup..."
+  require_root_free_gib 12
   curl --proto '=https' --tlsv1.2 --fail --show-error --location --retry 3 \
     "https://get-ghcup.haskell.org" --output "$ghcup_installer"
   chown root:root "$ghcup_installer"
@@ -999,6 +1165,7 @@ install_formal_methods() {
   rm -f -- "$ghcup_installer"
 
   echo "Installing HLint through Cabal..."
+  require_root_free_gib 10
   as_guest cabal update
   as_guest cabal install \
     --jobs=2 \
@@ -1016,6 +1183,7 @@ if [[ "$with_formal_methods" == "yes" ]]; then
   install_formal_methods
 fi
 
+require_root_free_gib 8
 install_guest_script codex "https://chatgpt.com/codex/install.sh"
 install_guest_script claude-code "https://claude.ai/install.sh"
 install_guest_script opencode "https://opencode.ai/install"
@@ -1026,6 +1194,7 @@ as_guest python3 -m venv "$uv_bootstrap"
 as_guest "$uv_bootstrap/bin/python" -m pip install --upgrade pip uv
 as_guest "$uv_bootstrap/bin/uv" tool install \
   --force --python python3.12 --with pip 'aider-chat@latest'
+rm -rf -- "$uv_bootstrap"
 
 # Unlike the three agent installers, this one is invoked directly as root
 # because Ollama installs a systemd unit. All installers must nevertheless be
@@ -1098,6 +1267,13 @@ env HOME="$root_runtime_home" OLLAMA_HOST=127.0.0.1:11434 \
   timeout 30s ollama --version
 systemctl is-active --quiet ollama.service
 
+apt-get clean
+rm -rf -- \
+  /var/lib/apt/lists/* \
+  "$guest_home/.cache/pip" \
+  "$guest_home/.cache/uv"
+rm -f -- "$emergency_reserve"
+
 {
   printf 'Provisioned: %s\n' "$(date --utc --iso-8601=seconds)"
   if [[ "$with_formal_methods" == "yes" ]]; then
@@ -1159,6 +1335,12 @@ ssh_pwauth: false
 package_update: false
 package_upgrade: false
 
+growpart:
+  mode: auto
+  devices: ['/']
+  ignore_growroot_disabled: false
+resize_rootfs: true
+
 write_files:
   - path: /etc/ssh/sshd_config.d/90-kvm-agent.conf
     owner: root:root
@@ -1176,7 +1358,7 @@ write_files:
     content: ${GUEST_PROVISION_B64}
 
 runcmd:
-  - ["/usr/local/sbin/kvm-agent-provision", "${GUEST_USER}", "${RESTRICT_PRIVATE_NETWORKS}", "${GATEWAY_ADDRESS}", "${WITH_FORMAL_METHODS}"]
+  - ["/usr/local/sbin/kvm-agent-provision", "${GUEST_USER}", "${RESTRICT_PRIVATE_NETWORKS}", "${GATEWAY_ADDRESS}", "${WITH_FORMAL_METHODS}", "${DISK_GB}"]
 
 final_message: "KVM-Agent cloud-init finished after \$UPTIME seconds; verify cloud-init status."
 EOF
@@ -1203,6 +1385,15 @@ cloud-localds "$WORK_DIR/seed.img" \
 sudo install -o root -g root -m 0600 "$WORK_DIR/seed.img" "$SEED_IMAGE"
 sudo cp --reflink=auto --sparse=always "$BASE_IMAGE" "$VM_DISK"
 sudo qemu-img resize "$VM_DISK" "${DISK_GB}G"
+vm_virtual_bytes="$(
+  sudo qemu-img info --output=json "$VM_DISK" \
+    | sed -n \
+        's/^[[:space:]]*"virtual-size":[[:space:]]*\([0-9][0-9]*\),\{0,1\}[[:space:]]*$/\1/p'
+)"
+[[ "$vm_virtual_bytes" =~ ^[1-9][0-9]*$ ]] || die \
+  "Could not verify the qcow2 virtual size after resizing."
+((vm_virtual_bytes >= requested_disk_bytes)) || die \
+  "The qcow2 image did not grow to the requested ${DISK_GB} GiB."
 sudo chown root:kvm "$VM_DISK"
 sudo chmod 0660 "$VM_DISK"
 CREATED_VM_ARTIFACTS="yes"

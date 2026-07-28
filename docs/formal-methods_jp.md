@@ -14,7 +14,6 @@ multi-script VM、Remote-SSH、offline bundle、profile 選択 architecture は
 ```bash
 ./setup-kvm-agent.sh \
   --name kvm-agent \
-  --disk 120 \
   --formal-methods
 ```
 
@@ -24,7 +23,6 @@ multi-script VM、Remote-SSH、offline bundle、profile 選択 architecture は
 ./setup-kvm-agent.sh \
   --replace-existing \
   --name kvm-agent \
-  --disk 120 \
   --formal-methods
 ```
 
@@ -58,9 +56,15 @@ Isabelle、Lean、GHC、HLS、VS Code の大きな download 後、Cabal で HLin
 build します。Guest RAM 8 GiB でも導入と小規模作業はできますが、大きな
 Isabelle session や並列 build には 16 GiB を推奨します。
 
-既定 80 GiB disk に基本 tool は入りますが、project 固有 Lean package、
-Haskell build store、Isabelle session、agent workspace のため 100～120 GiB を
-推奨します。Mathlib と AFP は自動 download しません。
+既定 120 GiB は、project 固有 Lean package、Haskell build store、Isabelle
+session、agent workspace に十分な余裕を持たせます。縮小 profile での通常の
+Isabelle/HOL、Lean、Haskell 作業は一般に 120 GiB よりかなり少ない容量で済みます。
+Mathlib、AFP、大きな model weight、project dataset は自動 download しません。
+
+Local disk は thin provisioning です。Setup は既存の formal-methods VM を置換する
+前に host backing storage に最低 30 GiB の空きがあることを確認し、package 導入前に
+guest root filesystem を拡張・検証します。これにより、qcow2 device の公称容量だけが
+120 GiB になり、source cloud image の小さな root filesystem が残る失敗を防ぎます。
 
 この profile の host-side wait 上限は 6 時間です。`--no-wait` を使った場合や
 terminal を中断した場合は、同じ setup command で完了させます。

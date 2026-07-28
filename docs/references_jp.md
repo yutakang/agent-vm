@@ -18,7 +18,18 @@ Installation interface、対応 Ubuntu release、provider route、security behav
 - [Ubuntu 24.04 LTS released cloud image directory](https://cloud-images.ubuntu.com/releases/24.04/release/)
 - [cloud-init: NoCloud data source](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html)
 - [cloud-init: users and groups](https://docs.cloud-init.io/en/latest/reference/yaml_examples/user_groups.html)
+- [cloud-init: growpart and resizefs modules](https://docs.cloud-init.io/en/latest/reference/modules.html)
 - [virt-install Ubuntu manpage](https://manpages.ubuntu.com/manpages/noble/man1/virt-install.1.html)
+
+## 将来の cloud storage adapter
+
+- [AWS: Amazon EBS volume type と size 範囲](https://docs.aws.amazon.com/ebs/latest/userguide/ebs-volume-types.html)
+- [AWS: Amazon EBS pricing](https://aws.amazon.com/ebs/pricing/)
+- [さくらのクラウド: server・disk 作成](https://manual.sakura.ad.jp/cloud/server/create-delete.html)
+- [さくらのクラウド: 文書化された SSD disk size](https://manual.sakura.ad.jp/cloud/storage/disk-migration.html)
+
+これらは将来の adapter のための資料です。現在の release は local KVM/libvirt guest
+だけを provision し、AWS やさくらの resource は作成しません。
 
 ## 導入する agent/model tool
 

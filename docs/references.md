@@ -18,7 +18,18 @@ Last reviewed: 2026-07-28.
 - [Ubuntu 24.04 LTS released cloud image directory](https://cloud-images.ubuntu.com/releases/24.04/release/)
 - [cloud-init: NoCloud data source](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html)
 - [cloud-init: users and groups](https://docs.cloud-init.io/en/latest/reference/yaml_examples/user_groups.html)
+- [cloud-init: growpart and resizefs modules](https://docs.cloud-init.io/en/latest/reference/modules.html)
 - [virt-install Ubuntu manpage](https://manpages.ubuntu.com/manpages/noble/man1/virt-install.1.html)
+
+## Future cloud storage adapters
+
+- [AWS: Amazon EBS volume types and size ranges](https://docs.aws.amazon.com/ebs/latest/userguide/ebs-volume-types.html)
+- [AWS: Amazon EBS pricing](https://aws.amazon.com/ebs/pricing/)
+- [Sakura Cloud: server and disk creation](https://manual.sakura.ad.jp/cloud/server/create-delete.html)
+- [Sakura Cloud: documented SSD disk sizes](https://manual.sakura.ad.jp/cloud/storage/disk-migration.html)
+
+These links inform future adapters only. The current release provisions local
+KVM/libvirt guests and does not create AWS or Sakura resources.
 
 ## Installed agent and model tools
 

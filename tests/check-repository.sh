@@ -97,6 +97,7 @@ for required in \
 done
 
 for required_text in \
+    "readonly DEFAULT_DISK_GB=120" \
     "https://chatgpt.com/codex/install.sh" \
     "https://claude.ai/install.sh" \
     "https://opencode.ai/install" \
@@ -125,6 +126,18 @@ for required_text in \
     "usermod -aG libvirt --"; do
   grep -Fq -- "$required_text" "$SETUP_SCRIPT" \
     || fail "setup script is missing: $required_text"
+done
+
+for required_disk_safety in \
+    "growpart:" \
+    "resize_rootfs: true" \
+    "ensure_requested_root_capacity" \
+    "Root filesystem is smaller than 90%" \
+    "emergency-space.reserve" \
+    "qemu-img info --output=json" \
+    "minimum_host_free_gib=30"; do
+  grep -Fq -- "$required_disk_safety" "$SETUP_SCRIPT" \
+    || fail "disk-capacity protection is missing: $required_disk_safety"
 done
 
 grep -Fq \
@@ -209,6 +222,7 @@ if missing:
 PY
 
 "${SCRIPT_DIR}/mock-setup.sh"
+"${SCRIPT_DIR}/mock-disk-growth.sh"
 "${SCRIPT_DIR}/mock-remove.sh"
 
 echo "Repository checks passed."

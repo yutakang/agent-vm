@@ -180,7 +180,27 @@ EOF
 
 cat > "$TEMP_DIR/bin/qemu-img" <<'EOF'
 #!/usr/bin/env bash
-[[ "${1:-}" == "resize" ]]
+case "${1:-}" in
+  resize)
+    printf '%s\n' "$*" > "$MOCK_STATE/qemu-img-resize"
+    disk_size="${3%G}"
+    printf '%s\n' "$((disk_size * 1024 * 1024 * 1024))" \
+      > "$MOCK_STATE/qemu-virtual-bytes"
+    ;;
+  info)
+    virtual_bytes="$(cat "$MOCK_STATE/qemu-virtual-bytes")"
+    cat <<OUTPUT
+{
+    "virtual-size": ${virtual_bytes},
+    "format": "qcow2"
+}
+OUTPUT
+    ;;
+  *)
+    echo "Unexpected mocked qemu-img command: $*" >&2
+    exit 1
+    ;;
+esac
 EOF
 
 cat > "$TEMP_DIR/bin/cloud-localds" <<'EOF'
@@ -291,7 +311,7 @@ MOCK_PATH="$TEMP_DIR/bin:$PATH"
 printf 'mockpass123\nmockpass123\n' \
   | env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
     "$TEMP_DIR/setup-under-test.sh" \
-      --name mock-agent --memory 8192 --vcpus 2 --disk 80 \
+      --name mock-agent --memory 8192 --vcpus 2 \
       --formal-methods \
       > "$TEMP_DIR/output"
 
@@ -301,6 +321,9 @@ grep -Fq "Formal tools:   Lean 4, Isabelle/HOL, GHC, Cabal, HLS, HLint" \
   "$TEMP_DIR/output"
 grep -Fq "virt-manager --connect qemu:///system" "$TEMP_DIR/output"
 grep -Fq "192.168.122.51" "$TEMP_DIR/output"
+grep -Fq "8192 MiB RAM, 2 vCPU, 120 GiB disk" "$TEMP_DIR/output"
+grep -Fq "resize $TEMP_DIR/images/vms/mock-agent.qcow2 120G" \
+  "$MOCK_STATE/qemu-img-resize"
 [[ -f "$MOCK_STATE/domain-defined" ]]
 [[ -f "$MOCK_STATE/rebooted" ]]
 [[ -f "$TEMP_DIR/images/vms/mock-agent.qcow2" ]]
@@ -311,8 +334,10 @@ grep -Fq "192.168.122.51" "$TEMP_DIR/output"
 grep -Fxq "formal-methods=yes" \
   "$TEMP_DIR/home/.local/share/kvm-agent/mock-agent/provisioning-mode"
 grep -Fq \
-  '["/usr/local/sbin/kvm-agent-provision", "agent", "yes", "192.168.122.1", "yes"]' \
+  '["/usr/local/sbin/kvm-agent-provision", "agent", "yes", "192.168.122.1", "yes", "120"]' \
   "$MOCK_STATE/user-data"
+grep -Fq "growpart:" "$MOCK_STATE/user-data"
+grep -Fq "resize_rootfs: true" "$MOCK_STATE/user-data"
 
 env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
   "$TEMP_DIR/setup-under-test.sh" \

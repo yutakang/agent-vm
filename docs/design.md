@@ -74,6 +74,32 @@ non-blocking polls. Every recovery SSH invocation is also wrapped in a
 host-side deadline, so neither an SSH session nor a remote cloud-init command
 can bypass the overall retry limit.
 
+## Disk sizing and future cloud adapters
+
+The local default is 120 GiB. This is intentionally comfortable for a
+graphical development guest, formal-method toolchains, build products, and
+agent workspaces. The qcow2 image is thin-provisioned, so the default does not
+reserve 120 GiB on the host immediately. Setup nevertheless checks a minimum
+amount of host backing space, verifies the qcow2 virtual size, explicitly
+grows the Ubuntu root partition and filesystem, and refuses large package
+installation until `/` exposes at least 90% of the requested size.
+
+The same numeric default should not be hard-coded into every future provider
+adapter:
+
+- AWS EBS gp3 accepts a 120 GiB volume, but charges for provisioned capacity
+  rather than the blocks that the guest has written.
+- Sakura Cloud exposes fixed disk-plan sizes; its documented choices include
+  100 GB and 250 GB rather than 120 GB.
+
+For that reason, a future AWS/Sakura implementation should share the
+guest-provisioning payload and its capacity verification, while keeping
+provider-specific VM, network, storage, and cleanup adapters. A 100 GB Sakura
+disk should normally hold this reduced theorem-proving profile; 250 GB is the
+next documented plan when projects, model weights, or datasets need more.
+Provider adapters must pass the capacity actually provisioned to the guest
+verification instead of pretending that every backend supplied 120 GiB.
+
 ## Why system libvirt
 
 The script uses `qemu:///system`, the same connection normally shown by
