@@ -13,6 +13,7 @@ readonly GUEST_RELEASE="24.04"
 readonly GUEST_ARCH="amd64"
 readonly LIBVIRT_URI="qemu:///system"
 readonly LIBVIRT_NETWORK="default"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 VM_NAME="kvm-agent"
 GUEST_USER="agent"
@@ -22,6 +23,8 @@ DISK_GB="80"
 WAIT_FOR_GUEST="yes"
 RESTRICT_PRIVATE_NETWORKS="yes"
 GATEWAY_ADDRESS=""
+OPERATION="create"
+REPLACE_EXISTING="no"
 
 WORK_DIR=""
 VM_DISK=""
@@ -46,6 +49,12 @@ Options:
   --allow-lan        Permit guest egress to private and link-local address
                      ranges. The firewall remains enabled and still denies
                      unsolicited inbound traffic. Use only when needed.
+  --replace-existing Completely remove an existing VM of the selected name,
+                     then create it again. The exact VM name must be typed to
+                     confirm deletion. Shared caches and extra disks are kept.
+  --finalize-existing
+                     Resume verified final cleanup of an already-provisioned
+                     VM after an interrupted wait or a --no-wait setup.
   -h, --help         Show this help without changing the system
 
 Requirements:
@@ -162,6 +171,14 @@ while (($# > 0)); do
       RESTRICT_PRIVATE_NETWORKS="no"
       shift
       ;;
+    --replace-existing)
+      REPLACE_EXISTING="yes"
+      shift
+      ;;
+    --finalize-existing)
+      OPERATION="finalize"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -182,6 +199,14 @@ done
 [[ "$GUEST_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die \
   "Guest user must be a valid lowercase Linux account name."
 [[ "$GUEST_USER" != "root" ]] || die "The guest login name cannot be root."
+if [[ "$OPERATION" == "finalize" ]]; then
+  [[ "$REPLACE_EXISTING" == "no" ]] || die \
+    "--finalize-existing and --replace-existing cannot be used together."
+  [[ -z "$RAM_MB" && -z "$VCPUS" && "$DISK_GB" == "80" \
+      && "$WAIT_FOR_GUEST" == "yes" \
+      && "$RESTRICT_PRIVATE_NETWORKS" == "yes" ]] || die \
+    "--finalize-existing accepts only --name and --user."
+fi
 positive_integer "$DISK_GB" || die "--disk must be a positive integer."
 ((DISK_GB >= 50)) || die "Use at least 50 GiB for the graphical guest."
 
@@ -201,6 +226,11 @@ HOST_USER_HOME="$(getent passwd "$HOST_USER" | awk -F: '{print $6}')"
 [[ -n "$HOST_USER_HOME" && "$HOST_USER_HOME" == /* \
     && -d "$HOST_USER_HOME" ]] || die \
   "Cannot resolve a usable home directory for host account '$HOST_USER'."
+
+if [[ "$OPERATION" == "finalize" ]]; then
+  exec "${SCRIPT_DIR}/finalize-kvm-agent.sh" \
+    --name "$VM_NAME" --user "$GUEST_USER"
+fi
 
 HOST_RAM_MB="$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)"
 HOST_CPUS="$(nproc)"
@@ -324,9 +354,17 @@ GATEWAY_ADDRESS="$(
 [[ "$GATEWAY_ADDRESS" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die \
   "Could not determine the IPv4 gateway of libvirt network '$LIBVIRT_NETWORK'."
 
+if [[ "$REPLACE_EXISTING" == "yes" ]]; then
+  log "Replacing the existing KVM-Agent VM"
+  printf 'The removal helper will show the exact VM-specific files and require\n'
+  printf 'you to type %q before anything is deleted.\n' "$VM_NAME"
+  "${SCRIPT_DIR}/remove-kvm-agent.sh" \
+    --name "$VM_NAME" --force
+fi
+
 if sudo virsh --connect "$LIBVIRT_URI" dominfo "$VM_NAME" \
     >/dev/null 2>&1; then
-  die "A libvirt VM named '$VM_NAME' already exists. Choose another --name or remove it deliberately in virt-manager."
+  die "A libvirt VM named '$VM_NAME' already exists. Choose another --name or rerun with --replace-existing."
 fi
 
 readonly IMAGE_NAME="ubuntu-${GUEST_RELEASE}-server-cloudimg-${GUEST_ARCH}.img"
@@ -793,6 +831,9 @@ print_next_steps() {
 
 if [[ "$WAIT_FOR_GUEST" != "yes" ]]; then
   warn "Provisioning continues inside the running VM."
+  printf 'When it has finished, complete the verified cleanup with:\n'
+  printf '  %q --finalize-existing --name %q --user %q\n\n' \
+    "${SCRIPT_DIR}/setup-kvm-agent.sh" "$VM_NAME" "$GUEST_USER"
   print_next_steps
   exit 0
 fi
@@ -873,16 +914,35 @@ if ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
 
   ssh_ready="no"
   for _ in $(seq 1 180); do
-    if ssh "${ssh_options[@]}" "${GUEST_USER}@${GUEST_IP}" \
-        "test -f /var/lib/kvm-agent/provisioned" >/dev/null 2>&1; then
-      ssh_ready="yes"
-      break
-    fi
+    # DHCP may assign a new address after reboot. Re-query every iteration and
+    # accept only an address that both belongs to this domain and answers with
+    # the repository recovery key plus the successful-provisioning marker.
+    while IFS= read -r candidate_ip; do
+      [[ -n "$candidate_ip" ]] || continue
+      if ssh "${ssh_options[@]}" "${GUEST_USER}@${candidate_ip}" \
+          "test -f /var/lib/kvm-agent/provisioned" >/dev/null 2>&1; then
+        GUEST_IP="$candidate_ip"
+        ssh_ready="yes"
+        break 2
+      fi
+    done < <(
+      LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" \
+        domifaddr "$VM_NAME" --source lease 2>/dev/null \
+        | awk '
+            $3 == "ipv4" {
+              split($4, address, "/")
+              if (!seen[address[1]]++) print address[1]
+            }
+          '
+    )
     sleep 5
   done
   [[ "$ssh_ready" == "yes" ]] || {
-    print_next_steps "$GUEST_IP"
-    die "The guest did not return from its first update reboot."
+    print_next_steps
+    printf 'Resume verified finalization later with:\n' >&2
+    printf '  %q --finalize-existing --name %q --user %q\n' \
+      "${SCRIPT_DIR}/setup-kvm-agent.sh" "$VM_NAME" "$GUEST_USER" >&2
+    die "The guest did not become reachable after its first update reboot; no final cleanup was attempted."
   }
 fi
 
