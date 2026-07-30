@@ -320,6 +320,78 @@ A good working cycle is:
 See [Daily operation](docs/daily-use.md) for snapshots, updates, SSH recovery,
 and data transfer.
 
+### Transfer files between the host and guest
+
+The locally hosted VM still has its own filesystem. An ordinary host-side `cp`
+cannot see `/home/agent` inside the guest, and KVM-Agent deliberately creates no
+shared host directory. Use host-initiated `scp` over libvirt's private network
+for routine transfers while the VM is running.
+
+Setup already creates a dedicated recovery key on the host and installs only its
+public half in the guest. For the default VM and user, prepare the current
+address and SSH options on the host as follows:
+
+```bash
+VM_NAME=kvm-agent
+VM_USER=agent
+KEY_DIR="$HOME/.local/share/kvm-agent/$VM_NAME"
+VM_IP="$(
+  sudo virsh --connect qemu:///system \
+    domifaddr "$VM_NAME" --source lease |
+    awk '$3 == "ipv4" { sub(/\/.*/, "", $4); print $4; exit }'
+)"
+test -n "$VM_IP" || {
+  echo "No guest IPv4 address found; start the VM and try again." >&2
+  exit 1
+}
+
+test -r "$KEY_DIR/id_ed25519" || {
+  echo "Recovery key not found: $KEY_DIR/id_ed25519" >&2
+  exit 1
+}
+
+SSH_OPTS=(
+  -o BatchMode=yes
+  -o ConnectTimeout=10
+  -o ForwardAgent=no
+  -o IdentitiesOnly=yes
+  -o IdentityAgent=none
+  -o StrictHostKeyChecking=accept-new
+  -o "UserKnownHostsFile=$KEY_DIR/known_hosts"
+  -i "$KEY_DIR/id_ed25519"
+)
+```
+
+Copy a file or directory **from the host into the guest**:
+
+```bash
+scp "${SSH_OPTS[@]}" -r ./my-project \
+  "$VM_USER@$VM_IP:/home/$VM_USER/"
+```
+
+Copy a file or directory **from the guest back to the host**, initiating the
+operation from the host:
+
+```bash
+mkdir -p "$HOME/vm-extraction-quarantine"
+chmod 700 "$HOME/vm-extraction-quarantine"
+
+scp "${SSH_OPTS[@]}" -r \
+  "$VM_USER@$VM_IP:/home/$VM_USER/Work/my-project" \
+  "$HOME/vm-extraction-quarantine/"
+```
+
+Omit `-r` for one file. Change `VM_NAME` and `VM_USER` if setup used non-default
+values. The private recovery key must remain on the host; never copy it into the
+guest or enable SSH-agent forwarding.
+
+Treat anything copied out of a potentially compromised guest as untrusted.
+Review it in a quarantine directory before executing it, building it, opening
+it as an IDE workspace, or moving it into an important repository. A small
+reviewable patch is preferable to copying an entire working tree. For stronger
+assurance, shut the guest down and extract from its virtual disk read-only
+instead; see [Daily operation](docs/daily-use.md).
+
 ## Important security limits
 
 KVM sharply reduces the consequences of an agent mistake, but it is not a proof

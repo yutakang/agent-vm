@@ -55,40 +55,116 @@ and projects make it too expensive to discard.
 
 ## Moving project data
 
-No host folder is shared automatically. Safer practical choices are:
+No host folder is shared automatically. A local VM still has a separate
+filesystem, so ordinary host-side `cp` cannot read or write files under the
+guest's `/home`. Safer practical choices are:
 
 1. clone a public or narrowly authorized repository inside the guest;
-2. copy a reviewed archive with `scp`;
-3. export a patch from the guest and review it on the host; or
+2. transfer reviewed files with host-initiated `scp`;
+3. export a small patch from the guest and review it on the host; or
 4. use a dedicated, short-lived Git branch and scoped token.
 
-The setup script prints the recovery key path. To copy a file into the guest:
+The setup script already creates a dedicated recovery key on the host and
+places only its public half in the guest. Prepare reusable shell variables for
+the default VM as follows:
 
 ```bash
-VM_IP=192.168.122.100
-scp -o IdentitiesOnly=yes \
-  -i ~/.local/share/kvm-agent/kvm-agent/id_ed25519 \
-  project.tar.gz agent@"$VM_IP":~
+VM_NAME=kvm-agent
+VM_USER=agent
+KEY_DIR="$HOME/.local/share/kvm-agent/$VM_NAME"
+VM_IP="$(
+  sudo virsh --connect qemu:///system \
+    domifaddr "$VM_NAME" --source lease |
+    awk '$3 == "ipv4" { sub(/\/.*/, "", $4); print $4; exit }'
+)"
+test -n "$VM_IP" || {
+  echo "No guest IPv4 address found; start the VM and try again." >&2
+  exit 1
+}
+test -r "$KEY_DIR/id_ed25519" || {
+  echo "Recovery key not found: $KEY_DIR/id_ed25519" >&2
+  exit 1
+}
+
+SSH_OPTS=(
+  -o BatchMode=yes
+  -o ConnectTimeout=10
+  -o ForwardAgent=no
+  -o IdentitiesOnly=yes
+  -o IdentityAgent=none
+  -o StrictHostKeyChecking=accept-new
+  -o "UserKnownHostsFile=$KEY_DIR/known_hosts"
+  -i "$KEY_DIR/id_ed25519"
+)
 ```
 
-Resolve the current address with:
+Copy a project from the host into the guest:
 
 ```bash
-virsh --connect qemu:///system domifaddr kvm-agent --source lease
+scp "${SSH_OPTS[@]}" -r ./my-project \
+  "$VM_USER@$VM_IP:/home/$VM_USER/"
 ```
 
-Avoid recursive copies of the host home directory. Never copy host SSH private
-keys, browser profiles, password-manager vaults, cloud configuration directories,
-or signing keys merely for convenience.
+Copy a result from the guest back to a quarantine directory on the host:
 
-For output, a patch is easy to inspect:
+```bash
+mkdir -p "$HOME/vm-extraction-quarantine"
+chmod 700 "$HOME/vm-extraction-quarantine"
+
+scp "${SSH_OPTS[@]}" -r \
+  "$VM_USER@$VM_IP:/home/$VM_USER/Work/my-project" \
+  "$HOME/vm-extraction-quarantine/"
+```
+
+Omit `-r` for one file. Initiating both directions from the host means the
+guest never receives the host's private recovery key. Do not copy a host SSH
+private key into the guest or enable SSH-agent forwarding.
+
+Avoid recursive copies of the host home directory. Never copy browser profiles,
+password-manager vaults, cloud configuration directories, signing keys, or
+other long-lived credentials merely for convenience.
+
+For output, a patch is usually easier and safer to inspect than a whole working
+tree. Inside the guest:
 
 ```bash
 git diff --binary > agent-result.patch
 ```
 
-Copy it out with `scp`, inspect it in a separate directory, run tests, and only
-then apply or commit it to an important repository.
+Copy the patch out with `scp`, inspect it in a separate directory, run tests,
+and only then apply or commit it to an important repository. Treat every file
+copied from a potentially compromised guest as untrusted; do not execute it,
+build it, or open the directory as an IDE workspace before review.
+
+### Stronger offline extraction
+
+To avoid active interaction with a potentially compromised guest, shut it down
+and extract from its virtual disk read-only. Install `libguestfs-tools` on the
+host if necessary:
+
+```bash
+sudo apt update
+sudo apt install libguestfs-tools
+```
+
+Then run, for the default disk layout:
+
+```bash
+VM_NAME=kvm-agent
+VM_DISK="/var/lib/libvirt/images/kvm-agent/vms/$VM_NAME.qcow2"
+DEST="$HOME/vm-extraction-quarantine"
+
+sudo virsh --connect qemu:///system domstate "$VM_NAME"
+mkdir -p "$DEST"
+chmod 700 "$DEST"
+sudo guestfish --ro --format=qcow2 -a "$VM_DISK" -i \
+  copy-out /home/agent/Work/my-project "$DEST"
+sudo chown -R "$USER:$USER" "$DEST"
+```
+
+Continue only when `domstate` reports `shut off`. Offline extraction is more
+cumbersome than `scp`, but it avoids relying on the running guest and gives a
+stable filesystem view.
 
 ## Recovery SSH
 

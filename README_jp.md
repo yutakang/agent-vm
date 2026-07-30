@@ -314,6 +314,77 @@ shutdown してください。`--force` は物理マシンの電源 cable を抜
 snapshot、更新、復旧 SSH、データ移動については
 [日常運用](docs/daily-use_jp.md)を参照してください。
 
+### ホストとゲストの間でファイルを転送する
+
+ローカルで動く VM であっても、ゲストは独立した filesystem を持ちます。ホスト側の
+通常の `cp` からゲスト内の `/home/agent` は見えません。また KVM-Agent は意図的に
+ホスト directory を共有しません。VM 実行中の通常の転送には、libvirt の private
+network 上でホストから開始する `scp` を使います。
+
+Setup は専用の復旧鍵をホスト上に作り、その公開鍵だけをゲストへ登録済みです。既定の
+VM 名と利用者名では、ホスト上で現在の address と SSH option を次のように準備します。
+
+```bash
+VM_NAME=kvm-agent
+VM_USER=agent
+KEY_DIR="$HOME/.local/share/kvm-agent/$VM_NAME"
+VM_IP="$(
+  sudo virsh --connect qemu:///system \
+    domifaddr "$VM_NAME" --source lease |
+    awk '$3 == "ipv4" { sub(/\/.*/, "", $4); print $4; exit }'
+)"
+test -n "$VM_IP" || {
+  echo "Guest IPv4 address が見つかりません。VM を起動して再実行してください。" >&2
+  exit 1
+}
+
+test -r "$KEY_DIR/id_ed25519" || {
+  echo "Recovery key が見つかりません: $KEY_DIR/id_ed25519" >&2
+  exit 1
+}
+
+SSH_OPTS=(
+  -o BatchMode=yes
+  -o ConnectTimeout=10
+  -o ForwardAgent=no
+  -o IdentitiesOnly=yes
+  -o IdentityAgent=none
+  -o StrictHostKeyChecking=accept-new
+  -o "UserKnownHostsFile=$KEY_DIR/known_hosts"
+  -i "$KEY_DIR/id_ed25519"
+)
+```
+
+File または directory を**ホストからゲストへ**コピーする例:
+
+```bash
+scp "${SSH_OPTS[@]}" -r ./my-project \
+  "$VM_USER@$VM_IP:/home/$VM_USER/"
+```
+
+File または directory を**ゲストからホストへ**コピーする場合も、操作はホストから
+開始します。
+
+```bash
+mkdir -p "$HOME/vm-extraction-quarantine"
+chmod 700 "$HOME/vm-extraction-quarantine"
+
+scp "${SSH_OPTS[@]}" -r \
+  "$VM_USER@$VM_IP:/home/$VM_USER/Work/my-project" \
+  "$HOME/vm-extraction-quarantine/"
+```
+
+File 一つだけなら `-r` を外します。Setup で既定以外の値を使った場合は `VM_NAME` と
+`VM_USER` を変更してください。復旧 private key は必ずホストに残し、ゲストへ
+コピーしたり SSH agent forwarding を有効にしたりしてはいけません。
+
+侵害された可能性があるゲストから取り出したものは、すべて非信頼データとして扱います。
+実行、build、IDE workspace としての open、重要 repository への移動より先に、隔離
+用 directory で review してください。Working tree 全体より、小さく review 可能な
+patch を取り出す方が安全です。より強い保証が必要なら、ゲストを shutdown して仮想
+ディスクから read-only で抽出します。詳しくは
+[日常運用](docs/daily-use_jp.md)を参照してください。
+
 ## 重要なセキュリティ上の限界
 
 KVM はエージェントの誤動作による影響を大幅に減らしますが、安全性の証明では

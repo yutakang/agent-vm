@@ -54,40 +54,112 @@ Snapshot は backup ではありません。通常は同じ host storage に依�
 
 ## Project data の移動
 
-Host folder は自動共有しません。実用的で比較的安全な選択肢:
+Host folder は自動共有しません。ローカル VM であっても guest は独立した filesystem
+を持つため、host 側の通常の `cp` から guest の `/home` 内を読み書きできません。
+実用的で比較的安全な選択肢:
 
 1. Public または権限を狭く限定した repository を guest 内で clone する。
-2. Review 済み archive を `scp` でコピーする。
-3. Guest から patch を export して host で review する。
+2. Review 済み file を host から開始する `scp` で転送する。
+3. Guest から小さな patch を export して host で review する。
 4. 専用の短期 Git branch と scope 限定 token を使う。
 
-Setup script は復旧 key path を表示します。Guest へ file を copy する例:
+Setup script は専用の復旧鍵を host 上に作り、その公開鍵だけを guest へ登録済みです。
+既定 VM 用の再利用可能な shell variable を次のように準備します。
 
 ```bash
-VM_IP=192.168.122.100
-scp -o IdentitiesOnly=yes \
-  -i ~/.local/share/kvm-agent/kvm-agent/id_ed25519 \
-  project.tar.gz agent@"$VM_IP":~
+VM_NAME=kvm-agent
+VM_USER=agent
+KEY_DIR="$HOME/.local/share/kvm-agent/$VM_NAME"
+VM_IP="$(
+  sudo virsh --connect qemu:///system \
+    domifaddr "$VM_NAME" --source lease |
+    awk '$3 == "ipv4" { sub(/\/.*/, "", $4); print $4; exit }'
+)"
+test -n "$VM_IP" || {
+  echo "Guest IPv4 address が見つかりません。VM を起動して再実行してください。" >&2
+  exit 1
+}
+test -r "$KEY_DIR/id_ed25519" || {
+  echo "Recovery key が見つかりません: $KEY_DIR/id_ed25519" >&2
+  exit 1
+}
+
+SSH_OPTS=(
+  -o BatchMode=yes
+  -o ConnectTimeout=10
+  -o ForwardAgent=no
+  -o IdentitiesOnly=yes
+  -o IdentityAgent=none
+  -o StrictHostKeyChecking=accept-new
+  -o "UserKnownHostsFile=$KEY_DIR/known_hosts"
+  -i "$KEY_DIR/id_ed25519"
+)
 ```
 
-現在の address:
+Project を host から guest へコピーします。
 
 ```bash
-virsh --connect qemu:///system domifaddr kvm-agent --source lease
+scp "${SSH_OPTS[@]}" -r ./my-project \
+  "$VM_USER@$VM_IP:/home/$VM_USER/"
 ```
 
-Host home 全体の recursive copy は避けてください。Host SSH private key、browser
-profile、password-manager vault、cloud 設定 directory、signing key を利便性だけの
-ためにコピーしてはいけません。
+Guest の結果を host の隔離 directory へコピーします。
 
-出力には review しやすい patch を使えます。
+```bash
+mkdir -p "$HOME/vm-extraction-quarantine"
+chmod 700 "$HOME/vm-extraction-quarantine"
+
+scp "${SSH_OPTS[@]}" -r \
+  "$VM_USER@$VM_IP:/home/$VM_USER/Work/my-project" \
+  "$HOME/vm-extraction-quarantine/"
+```
+
+File 一つなら `-r` を外します。両方向とも host から操作を開始するため、host の復旧
+private key を guest へ渡す必要はありません。Host SSH private key を guest へ
+コピーしたり SSH agent forwarding を有効にしたりしてはいけません。
+
+Host home 全体の recursive copy は避けてください。Browser profile、password-manager
+vault、cloud 設定 directory、signing key、その他の長期 credential を利便性だけのために
+コピーしてはいけません。
+
+出力には working tree 全体より、確認しやすい patch を使う方が通常は安全です。
+Guest 内で:
 
 ```bash
 git diff --binary > agent-result.patch
 ```
 
-`scp` で外へ出し、別 directory で確認・test し、重要 repository へ apply/commit
-するのはその後です。
+Patch を `scp` で外へ出し、別 directory で確認・test してから、重要 repository へ
+apply/commit します。侵害された可能性がある guest からコピーした file はすべて非信頼
+として扱い、review 前に実行、build、IDE workspace としての open を行わないでください。
+
+### より強い offline 抽出
+
+侵害された可能性がある guest と能動的に通信したくない場合は、guest を shutdown し、
+仮想 disk から read-only で抽出します。必要なら host へ `libguestfs-tools` を導入します。
+
+```bash
+sudo apt update
+sudo apt install libguestfs-tools
+```
+
+既定の disk 配置では次を実行します。
+
+```bash
+VM_NAME=kvm-agent
+VM_DISK="/var/lib/libvirt/images/kvm-agent/vms/$VM_NAME.qcow2"
+DEST="$HOME/vm-extraction-quarantine"
+
+sudo virsh --connect qemu:///system domstate "$VM_NAME"
+mkdir -p "$DEST"
+chmod 700 "$DEST"
+sudo guestfish --ro --format=qcow2 -a "$VM_DISK" -i \
+  copy-out /home/agent/Work/my-project "$DEST"
+sudo chown -R "$USER:$USER" "$DEST"
+```
+
+`domstate` が `shut off` と表示した場合だけ続行してください。Offline 抽出は `scp` より
+手間がかかりますが、実行中 guest に依存せず、安定した filesystem view を得られます。
 
 ## 復旧 SSH
 
