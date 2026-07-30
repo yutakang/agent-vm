@@ -18,6 +18,7 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly IMAGE_DIR="/var/lib/libvirt/images/kvm-agent"
 readonly VM_IMAGE_DIR="${IMAGE_DIR}/vms"
 readonly SSH_COMMAND_TIMEOUT_SECONDS=20
+readonly SWARM_PROVISION_TIMEOUT_SECONDS=1800
 readonly DEFAULT_DISK_GB=120
 
 VM_NAME="kvm-agent"
@@ -69,6 +70,7 @@ Options:
   --swarm-role ROLE  Prepare this guest as a cross-host swarm "manager",
                      "worker", or "both". A manager receives a dedicated SSH
                      key; a worker receives a locked-down non-sudo account.
+                     The role does not change the VM name.
   --swarm-network NET
                      Overlay network for --swarm-role or --add-swarm:
                      "tailscale" (default) or "wireguard". Installation does
@@ -229,7 +231,7 @@ finalize_managed_guest() {
   local wait_status=0
 
   [[ -r "$SSH_PRIVATE_KEY" ]] || die \
-    "Recovery SSH key not found: $SSH_PRIVATE_KEY"
+    "Recovery SSH key not found: $SSH_PRIVATE_KEY. Check --name: the default VM name is 'kvm-agent', and swarm roles do not rename the VM."
   sudo virsh --connect "$LIBVIRT_URI" dominfo "$VM_NAME" >/dev/null 2>&1 || die \
     "No libvirt VM named '$VM_NAME' exists."
 
@@ -401,7 +403,7 @@ add_swarm_to_managed_guest() {
   local swarm_script_b64
 
   [[ -r "$SSH_PRIVATE_KEY" ]] || die \
-    "Recovery SSH key not found: $SSH_PRIVATE_KEY"
+    "Recovery SSH key not found: $SSH_PRIVATE_KEY. Check --name: the default VM name is 'kvm-agent', and swarm roles do not rename the VM."
   sudo virsh --connect "$LIBVIRT_URI" dominfo "$VM_NAME" >/dev/null 2>&1 || die \
     "No libvirt VM named '$VM_NAME' exists."
 
@@ -428,9 +430,13 @@ add_swarm_to_managed_guest() {
     "Could not reach '$VM_NAME' through its managed recovery SSH key within five minutes."
 
   log "Adding the '$SWARM_ROLE' swarm role with '$SWARM_NETWORK' networking"
-  guest_ssh \
-    "printf '%s' '$swarm_script_b64' | base64 -d | sudo install -o root -g root -m 0700 /dev/stdin /usr/local/sbin/kvm-agent-swarm-provision && sudo /usr/local/sbin/kvm-agent-swarm-provision '$SWARM_ROLE' '$SWARM_NETWORK' '$GUEST_USER'" \
-    || die "Swarm provisioning failed inside the existing guest."
+  if ! guest_ssh_to "$GUEST_IP" "$SWARM_PROVISION_TIMEOUT_SECONDS" \
+      "printf '%s' '$swarm_script_b64' | base64 -d | sudo install -o root -g root -m 0700 /dev/stdin /usr/local/sbin/kvm-agent-swarm-provision && sudo /usr/local/sbin/kvm-agent-swarm-provision '$SWARM_ROLE' '$SWARM_NETWORK' '$GUEST_USER'"; then
+    warn "Swarm provisioning failed inside the existing guest."
+    warn "Recent guest-side swarm log follows:"
+    guest_ssh "sudo tail -n 200 /var/log/kvm-agent-swarm.log 2>/dev/null || true" >&2 || true
+    die "Review the log above, correct the reported problem, and rerun --add-swarm."
+  fi
 
   log "Swarm profile"
   guest_ssh "kvm-agent-swarm-status" || die \
@@ -630,8 +636,8 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
-apt-get update
-apt-get install -y openssh-client openssh-server rsync ufw ca-certificates curl
+apt-get -o DPkg::Lock::Timeout=600 update
+apt-get -o DPkg::Lock::Timeout=600 install -y openssh-client openssh-server rsync ufw ca-certificates curl
 
 case "$network" in
   tailscale)
@@ -661,7 +667,7 @@ case "$network" in
     fi
     ;;
   wireguard)
-    apt-get install -y wireguard-tools
+    apt-get -o DPkg::Lock::Timeout=600 install -y wireguard-tools
     # WireGuard peer addresses are selected by the operator later. Interface-
     # scoped rules preserve the default private-range block on every other
     # interface and permit only authenticated wg0 peers once configured.

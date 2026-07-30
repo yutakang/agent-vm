@@ -142,7 +142,7 @@ download、disk、provisioning 費用を負いません。
 | ネットワーク | 初回プロビジョニング中にインターネット接続 |
 | 表示 | `virt-manager` 用のローカル GUI Ubuntu セッション |
 | ディスク | Guest 仮想 disk は既定 120 GiB。Host 空きは最低 12 GiB、`--formal-methods` では 30 GiB |
-| メモリ | ゲスト 8 GiB を推奨。既定値は host に最低 2 GiB を残す |
+| メモリ | Host RAM の 75% を自動割当（上限 32 GiB、host に最低 2 GiB を確保）。快適な利用には 8 GiB 以上を推奨 |
 
 既定 memory は host RAM の 75% で、上限 32 GiB、かつ host に最低 2 GiB を
 残します。既定 vCPU は host logical CPU の 75% で、上限 16 です。例えば
@@ -303,8 +303,10 @@ state が以前の resource configuration を復元することを防ぎます�
 
 大多数の利用者はこの機能を無視できます。初回は
 `--swarm-role manager|worker|both`、後からは `--add-swarm` で role を追加できます。
-既定は Tailscale、raw WireGuard も選択可能です。Provisioning は device enrollment や
-peer authorization を自動化しません。Directional access と risk の説明を含む
+これらの role は VM を改名しないため、異なる host 上の VM は両方とも既定名
+`kvm-agent` のままで構いません。既定は Tailscale、raw WireGuard も選択可能です。
+Provisioning は device enrollment や peer authorization を自動化しません。
+Directional access と risk の説明を含む
 [cross-host manager/worker VM](docs/swarm_jp.md)を有効化前に読んでください。
 
 ## 中断した finalization を再開する

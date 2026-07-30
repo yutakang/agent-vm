@@ -142,7 +142,7 @@ The supported primary path is:
 | Network | Internet access during initial provisioning |
 | Display | Local graphical Ubuntu session for `virt-manager` |
 | Disk | 120 GiB guest virtual disk by default; at least 12 GiB free on the host, or 30 GiB with `--formal-methods` |
-| Memory | 8 GiB guest recommended; the default keeps at least 2 GiB for the host |
+| Memory | Dynamically allocated: 75% of host RAM, capped at 32 GiB, while retaining at least 2 GiB for the host; at least 8 GiB is recommended |
 
 The default memory is 75% of host RAM, capped at 32 GiB while retaining at
 least 2 GiB for the host. The default vCPU count is 75% of the host's logical
@@ -308,10 +308,12 @@ supported. KVM-Agent therefore uses the predictable powered-off path instead.
 ## Optional cross-host manager/worker VMs
 
 Most users can ignore this feature. `--swarm-role manager|worker|both` prepares
-an initial VM, and `--add-swarm` adds a role later; Tailscale is the default and
-raw WireGuard is optional. Provisioning does not enroll devices or authorize
-peers automatically. Read [Cross-host manager/worker VMs](docs/swarm.md) before
-enabling it, including the directional-access and risk guidance.
+an initial VM, and `--add-swarm` adds a role later; these roles do not rename
+the VM, so separate hosts may both keep the default name `kvm-agent`. Tailscale
+is the default and raw WireGuard is optional. Provisioning does not enroll
+devices or authorize peers automatically. Read
+[Cross-host manager/worker VMs](docs/swarm.md) before enabling it, including the
+directional-access and risk guidance.
 
 ## Resume interrupted finalization
 

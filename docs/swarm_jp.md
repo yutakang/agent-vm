@@ -22,41 +22,57 @@ Dell host                                Galleria host
 
 ## Provisioning が追加するもの
 
-両 role とも同じ `setup-kvm-agent.sh` を使います。
+両 role とも同じ `setup-kvm-agent.sh` を使います。`manager`、`worker`、
+`both` は **role** であり、VM 名ではありません。Guest は異なる物理 host 上に
+あるため、両方とも repository の既定 VM 名 `kvm-agent` を使えます。その VM を
+custom name で作成した場合だけ `--name` を指定してください。
 
 初回作成時:
 
 ```bash
-# 既定 overlay は Tailscale
-./setup-kvm-agent.sh --name agent-manager --formal-methods --swarm-role manager
-./setup-kvm-agent.sh --name agent-worker --formal-methods --swarm-role worker
+# manager にする VM の物理 host で実行。既定 overlay は Tailscale。
+./setup-kvm-agent.sh --formal-methods --swarm-role manager
 
-# raw WireGuard を使う場合
+# worker にする VM の物理 host で実行。
+./setup-kvm-agent.sh --formal-methods --swarm-role worker
+
+# raw WireGuard を使う場合は、worker にする VM の物理 host で実行。
 ./setup-kvm-agent.sh \
-  --name agent-worker \
   --formal-methods \
   --swarm-role worker \
   --swarm-network wireguard
 ```
 
-Repository で既に作成・provisioning 済みの VM に後から追加する場合:
+Repository で作成・provisioning 済みの、既定名の VM に後から追加する場合:
 
 ```bash
-./setup-kvm-agent.sh \
-  --add-swarm manager \
-  --name agent-manager \
-  --user agent
+# manager にする VM の物理 host で実行。
+./setup-kvm-agent.sh --add-swarm manager
 
+# worker にする VM の物理 host で実行。
 ./setup-kvm-agent.sh \
   --add-swarm worker \
-  --name agent-worker \
-  --user agent \
   --swarm-network tailscale
 ```
 
-`--add-swarm` は、その VM 用に host が既に管理している recovery key を使います。
-Guest を再作成・削除しません。Guest は起動中で、libvirt private network 経由で
-到達可能である必要があります。
+既存 VM が実際に non-default の値を使っている場合だけ、`--name`（および
+`--user`）を指定します。例えば:
+
+```bash
+./setup-kvm-agent.sh \
+  --add-swarm worker \
+  --name proof-vm-02 \
+  --user researcher \
+  --swarm-network tailscale
+```
+
+`--add-swarm` は、選択した VM 用に host が既に管理している recovery key を
+使います。Guest を再作成・削除しません。Guest は起動中で、libvirt private
+network 経由で到達可能である必要があります。package の導入には数分かかることが
+あるため、この Guest 内処理には最大 30 分を許可します。失敗時には最近の
+`/var/log/kvm-agent-swarm.log` を自動表示します。誤った `--name` を指定すると、
+script は別の per-VM directory で recovery key を探します。既定名は
+`kvm-agent` です。
 
 Role は次の 3 種類です。
 

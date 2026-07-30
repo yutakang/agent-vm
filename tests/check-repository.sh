@@ -113,6 +113,7 @@ done
 
 for required_text in \
     "readonly DEFAULT_DISK_GB=120" \
+    "readonly SWARM_PROVISION_TIMEOUT_SECONDS=1800" \
     "https://chatgpt.com/codex/install.sh" \
     "https://claude.ai/install.sh" \
     "https://opencode.ai/install" \
@@ -163,10 +164,31 @@ for required_swarm_text in \
     '--clear)' \
     'DisableForwarding yes' \
     'PermitTTY no' \
-    'systemctl enable --now tailscaled.service'; do
+    'systemctl enable --now tailscaled.service' \
+    'DPkg::Lock::Timeout=600'; do
   grep -Fq -- "$required_swarm_text" "$TEMP_DIR/swarm-provision.sh" \
     || fail "swarm provisioning is missing: $required_swarm_text"
 done
+
+grep -Fq -- 'guest_ssh_to "$GUEST_IP" "$SWARM_PROVISION_TIMEOUT_SECONDS"' "$SETUP_SCRIPT" \
+  || fail "post-provisioning swarm setup still uses the short SSH probe timeout"
+grep -Fq -- 'sudo tail -n 200 /var/log/kvm-agent-swarm.log' "$SETUP_SCRIPT" \
+  || fail "post-provisioning swarm setup does not report its guest log on failure"
+
+# Swarm roles are independent of libvirt VM names. Keep the primary examples
+# on the repository default and prevent role-looking example names from
+# reintroducing recovery-key lookup confusion.
+for swarm_doc in "${REPO_DIR}/docs/swarm.md" "${REPO_DIR}/docs/swarm_jp.md"; do
+  grep -Fq -- '`kvm-agent`' "$swarm_doc" \
+    || fail "swarm guide does not explain the default VM name: $swarm_doc"
+  if grep -Eq -- '--name[[:space:]]+(agent-manager|agent-worker)' "$swarm_doc"; then
+    fail "swarm guide uses a role as a VM name: $swarm_doc"
+  fi
+done
+grep -Fq -- 'The role does not change the VM name.' "$SETUP_SCRIPT" \
+  || fail "setup help does not distinguish swarm role from VM name"
+grep -Fq -- "Check --name: the default VM name is 'kvm-agent'" "$SETUP_SCRIPT" \
+  || fail "recovery-key error does not explain the default VM name"
 
 for required_resource_text in \
     '((RAM_MB > 32768)) && RAM_MB=32768' \

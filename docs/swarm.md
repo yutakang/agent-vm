@@ -24,41 +24,58 @@ worker's physical host.
 
 ## What provisioning adds
 
-Use the same `setup-kvm-agent.sh` script for both roles.
+Use the same `setup-kvm-agent.sh` script for both roles. `manager`, `worker`,
+and `both` are **roles**, not VM names. Because the guests are on different
+physical hosts, both may use the repository's default VM name, `kvm-agent`.
+Omit `--name` unless that particular VM was created with a custom name.
 
 During initial creation:
 
 ```bash
-# Default overlay: Tailscale
-./setup-kvm-agent.sh --name agent-manager --formal-methods --swarm-role manager
-./setup-kvm-agent.sh --name agent-worker --formal-methods --swarm-role worker
+# Run on the intended manager's physical host. Default overlay: Tailscale.
+./setup-kvm-agent.sh --formal-methods --swarm-role manager
 
-# Raw WireGuard instead
+# Run on the intended worker's physical host.
+./setup-kvm-agent.sh --formal-methods --swarm-role worker
+
+# Raw WireGuard instead, on the intended worker's physical host.
 ./setup-kvm-agent.sh \
-  --name agent-worker \
   --formal-methods \
   --swarm-role worker \
   --swarm-network wireguard
 ```
 
-Add a role later to an already-provisioned VM created by this repository:
+Add a role later to an already-provisioned default-named VM created by this
+repository:
 
 ```bash
-./setup-kvm-agent.sh \
-  --add-swarm manager \
-  --name agent-manager \
-  --user agent
+# Run on the physical host of the VM that will be the manager.
+./setup-kvm-agent.sh --add-swarm manager
 
+# Run on the physical host of the VM that will be the worker.
 ./setup-kvm-agent.sh \
   --add-swarm worker \
-  --name agent-worker \
-  --user agent \
   --swarm-network tailscale
 ```
 
-`--add-swarm` uses the host-side recovery key already managed for that VM. It
-does not rebuild or delete the guest. The guest must be running and reachable
-through libvirt's private network.
+Only specify `--name` (and `--user`) when the existing VM actually uses
+non-default values, for example:
+
+```bash
+./setup-kvm-agent.sh \
+  --add-swarm worker \
+  --name proof-vm-02 \
+  --user researcher \
+  --swarm-network tailscale
+```
+
+`--add-swarm` uses the host-side recovery key already managed for the selected
+VM. It does not rebuild or delete the guest. The guest must be running and
+reachable through libvirt's private network. Package installation can take
+several minutes; the script allows up to 30 minutes for this guest-side step
+and prints the recent `/var/log/kvm-agent-swarm.log` automatically if it fails. A wrong `--name` makes the script
+look for a recovery key in the wrong per-VM directory; the default is
+`kvm-agent`.
 
 Available roles are:
 
