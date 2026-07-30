@@ -6,7 +6,7 @@
 Installation interface、対応 Ubuntu release、provider route、security behavior は
 変化します。
 
-最終確認: 2026-07-28。
+最終確認: 2026-07-30。
 
 ## Ubuntu、KVM、libvirt、cloud-init
 
@@ -58,6 +58,22 @@ download します。
 縮小 profile は Lean、Haskell、VS Code、extension について現在の公式 channel に
 従います。Isabelle2025-2 は明示選択し、公式 Linux archive の checksum を検証します。
 [縮小形式手法環境](formal-methods_jp.md)も参照してください。
+
+## 任意の cross-host manager/worker network
+
+- [Tailscale の Linux への導入](https://tailscale.com/docs/install/linux)
+- [Tailscale grants](https://tailscale.com/docs/features/access-control/grants)
+- [Tailscale routing feature](https://tailscale.com/docs/route)
+- [Tailscale SSH](https://tailscale.com/docs/features/tailscale-ssh)
+- [WireGuard overview](https://www.wireguard.com/)
+- [WireGuard quick start](https://www.wireguard.com/quickstart/)
+- [libvirt virsh command reference](https://www.libvirt.org/manpages/virsh.html)
+- [OpenSSH server configuration](https://man.openbsd.org/sshd_config)
+
+任意の swarm profile は overlay client を guest 内へ導入し、command 実行と file
+transfer には通常の OpenSSH を引き続き使います。物理 host は自動 enrollment しません。
+永続 memory・vCPU 変更は powered-off domain に対する libvirt configuration operation
+を使います。[任意の cross-host manager/worker VM](swarm_jp.md)も参照してください。
 
 ## Provider 設定
 

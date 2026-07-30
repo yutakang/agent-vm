@@ -31,6 +31,10 @@ GATEWAY_ADDRESS=""
 OPERATION="create"
 REPLACE_EXISTING="no"
 WITH_FORMAL_METHODS="no"
+SWARM_ROLE="none"
+SWARM_NETWORK=""
+SWARM_ROLE_OPTION_SET="no"
+ADD_SWARM_ROLE_SET="no"
 
 WORK_DIR=""
 VM_DISK=""
@@ -43,13 +47,16 @@ Usage:
   ./setup-kvm-agent.sh [OPTIONS]
 
 Create a graphical Ubuntu 24.04 LTS KVM guest and install Codex, Claude Code,
-OpenCode, Aider, and Ollama inside it. Formal-methods tools are optional.
+OpenCode, Aider, and Ollama inside it. Formal-methods and cross-host swarm
+support are optional.
 
 Options:
   --name NAME        VM and host name (default: kvm-agent)
   --user NAME        Guest login name (default: agent)
-  --memory MB        Guest RAM in MiB (default: half of host RAM, 8-16 GiB)
-  --vcpus NUMBER     Guest virtual CPUs (default: half of host CPUs, 2-8)
+  --memory MB        Guest RAM in MiB (default: 75% of host RAM, capped at
+                     32 GiB while leaving at least 2 GiB for the host)
+  --vcpus NUMBER     Guest virtual CPUs (default: 75% of host CPUs, capped at
+                     16)
   --disk GB          Guest virtual disk size (default: 120)
   --no-wait          Start provisioning but do not wait for it to finish
   --allow-lan        Permit guest egress to private and link-local address
@@ -59,6 +66,18 @@ Options:
                      GHC/GHCup, Cabal, HLS, HLint, VS Code, and the official
                      Lean and Haskell VS Code extensions inside the guest.
                      This may add several hours to first provisioning.
+  --swarm-role ROLE  Prepare this guest as a cross-host swarm "manager",
+                     "worker", or "both". A manager receives a dedicated SSH
+                     key; a worker receives a locked-down non-sudo account.
+  --swarm-network NET
+                     Overlay network for --swarm-role or --add-swarm:
+                     "tailscale" (default) or "wireguard". Installation does
+                     not enroll a Tailscale device or invent WireGuard peers.
+  --add-swarm ROLE   Add the selected swarm role to an already-provisioned VM.
+                     Accepts --name, --user, and --swarm-network.
+  --resize-existing  Change RAM and/or vCPU allocation of an existing, powered
+                     off VM without deleting its disk. Use with --memory and/or
+                     --vcpus.
   --replace-existing Completely remove an existing VM of the selected name,
                      then create it again. The exact VM name must be typed to
                      confirm deletion. Shared caches and extra disks are kept.
@@ -88,6 +107,15 @@ warn() {
 die() {
   printf 'Error: %s\n' "$*" >&2
   exit 1
+}
+
+select_operation() {
+  local requested="$1"
+  local option="$2"
+  if [[ "$OPERATION" != "create" && "$OPERATION" != "$requested" ]]; then
+    die "$option cannot be combined with another operation mode."
+  fi
+  OPERATION="$requested"
 }
 
 parse_qemu_virtual_size_bytes() {
@@ -369,6 +397,136 @@ finalize_managed_guest() {
     "Cleanup succeeded, but installed tool versions could not be read."
 }
 
+add_swarm_to_managed_guest() {
+  local swarm_script_b64
+
+  [[ -r "$SSH_PRIVATE_KEY" ]] || die \
+    "Recovery SSH key not found: $SSH_PRIVATE_KEY"
+  sudo virsh --connect "$LIBVIRT_URI" dominfo "$VM_NAME" >/dev/null 2>&1 || die \
+    "No libvirt VM named '$VM_NAME' exists."
+
+  WORK_DIR="$(mktemp -d)"
+  write_swarm_provision_script "$WORK_DIR/swarm-provision.sh"
+  swarm_script_b64="$(base64 -w 0 "$WORK_DIR/swarm-provision.sh")"
+
+  ssh_options=(
+    -o BatchMode=yes
+    -o ConnectTimeout=5
+    -o ConnectionAttempts=1
+    -o ForwardAgent=no
+    -o IdentitiesOnly=yes
+    -o ServerAliveCountMax=1
+    -o ServerAliveInterval=5
+    -o StrictHostKeyChecking=accept-new
+    -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS}"
+    -i "$SSH_PRIVATE_KEY"
+  )
+
+  log "Waiting for recovery SSH to the existing guest"
+  GUEST_IP=""
+  wait_for_guest_ssh 60 true || die \
+    "Could not reach '$VM_NAME' through its managed recovery SSH key within five minutes."
+
+  log "Adding the '$SWARM_ROLE' swarm role with '$SWARM_NETWORK' networking"
+  guest_ssh \
+    "printf '%s' '$swarm_script_b64' | base64 -d | sudo install -o root -g root -m 0700 /dev/stdin /usr/local/sbin/kvm-agent-swarm-provision && sudo /usr/local/sbin/kvm-agent-swarm-provision '$SWARM_ROLE' '$SWARM_NETWORK' '$GUEST_USER'" \
+    || die "Swarm provisioning failed inside the existing guest."
+
+  log "Swarm profile"
+  guest_ssh "kvm-agent-swarm-status" || die \
+    "Swarm provisioning completed, but its status could not be read."
+}
+
+resize_managed_guest() {
+  local state
+  local domain_info
+  local managed_save="no"
+  local current_memory_kib=""
+  local current_vcpus=""
+
+  domain_info="$(LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" dominfo "$VM_NAME")" || die \
+    "No libvirt VM named '$VM_NAME' exists."
+  managed_save="$(awk -F: '
+    /^Managed save:/ {
+      value=$2
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      print tolower(value)
+      exit
+    }
+  ' <<< "$domain_info")"
+  [[ "$managed_save" != "yes" ]] || die \
+    "VM '$VM_NAME' has a managed-save image. Start it and perform a normal full shutdown before resizing; otherwise libvirt may restore the old saved resource state."
+  state="$(LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" domstate "$VM_NAME" | tr -d '\r' | xargs)"
+  [[ "$state" == "shut off" ]] || die \
+    "Power off '$VM_NAME' before resizing it (current state: ${state:-unknown}). The VM and its disk are not removed."
+
+  if [[ -n "$RAM_MB" ]]; then
+    current_memory_kib="$({
+      LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" dumpxml "$VM_NAME" --inactive
+    } | python3 -c '
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.stdin).getroot()
+node = root.find("currentMemory")
+if node is None:
+    node = root.find("memory")
+if node is None or not (node.text or "").strip().isdigit():
+    raise SystemExit(1)
+value = int(node.text.strip())
+unit = (node.get("unit") or "KiB").lower()
+scale = {"b": 1/1024, "kib": 1, "mib": 1024, "gib": 1024*1024}.get(unit)
+if scale is None:
+    raise SystemExit(1)
+print(int(value * scale))
+')" || die "Could not read the existing guest memory configuration."
+
+    if ((RAM_MB * 1024 >= current_memory_kib)); then
+      sudo virsh --connect "$LIBVIRT_URI" setmaxmem "$VM_NAME" \
+        "${RAM_MB}MiB" --config >/dev/null || die \
+        "Could not raise the persistent maximum memory."
+      sudo virsh --connect "$LIBVIRT_URI" setmem "$VM_NAME" \
+        "${RAM_MB}MiB" --config >/dev/null || die \
+        "Could not set the persistent guest memory."
+    else
+      sudo virsh --connect "$LIBVIRT_URI" setmem "$VM_NAME" \
+        "${RAM_MB}MiB" --config >/dev/null || die \
+        "Could not lower the persistent guest memory."
+      sudo virsh --connect "$LIBVIRT_URI" setmaxmem "$VM_NAME" \
+        "${RAM_MB}MiB" --config >/dev/null || die \
+        "Could not lower the persistent maximum memory."
+    fi
+  fi
+
+  if [[ -n "$VCPUS" ]]; then
+    current_vcpus="$(LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" \
+      vcpucount "$VM_NAME" --maximum --config)" || die \
+      "Could not read the existing guest vCPU configuration."
+    positive_integer "$current_vcpus" || die \
+      "libvirt returned an invalid maximum vCPU count."
+
+    if ((VCPUS >= current_vcpus)); then
+      sudo virsh --connect "$LIBVIRT_URI" setvcpus "$VM_NAME" "$VCPUS" \
+        --maximum --config >/dev/null || die \
+        "Could not raise the persistent maximum vCPU count."
+      sudo virsh --connect "$LIBVIRT_URI" setvcpus "$VM_NAME" "$VCPUS" \
+        --config >/dev/null || die \
+        "Could not set the persistent active vCPU count."
+    else
+      sudo virsh --connect "$LIBVIRT_URI" setvcpus "$VM_NAME" "$VCPUS" \
+        --config >/dev/null || die \
+        "Could not lower the persistent active vCPU count."
+      sudo virsh --connect "$LIBVIRT_URI" setvcpus "$VM_NAME" "$VCPUS" \
+        --maximum --config >/dev/null || die \
+        "Could not lower the persistent maximum vCPU count."
+    fi
+  fi
+
+  log "Updated persistent resources for '$VM_NAME'"
+  LC_ALL=C sudo virsh --connect "$LIBVIRT_URI" dominfo "$VM_NAME"
+  printf '\nStart the existing VM normally; no disk or guest data was removed.\n'
+}
+
 # Report "present", "absent", or "unknown" for the target domain. "unknown"
 # means libvirt could not be queried at all, which must never be treated as
 # "the domain does not exist": that mistake deletes a live VM's disk.
@@ -425,6 +583,289 @@ positive_integer() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
 }
 
+write_swarm_provision_script() {
+  local destination="$1"
+
+  cat > "$destination" <<'SWARM_SCRIPT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+role="${1:?swarm role is required}"
+network="${2:?swarm network is required}"
+guest_user="${3:?guest user is required}"
+marker="/var/lib/kvm-agent/swarm-profile"
+worker_user="agent-worker"
+worker_home="/home/${worker_user}"
+
+case "$role" in
+  manager|worker|both) ;;
+  *) echo "Invalid swarm role: $role" >&2; exit 2 ;;
+esac
+case "$network" in
+  tailscale|wireguard) ;;
+  *) echo "Invalid swarm network: $network" >&2; exit 2 ;;
+esac
+
+guest_home="$(getent passwd "$guest_user" | awk -F: '{print $6}')"
+guest_group="$(id -gn "$guest_user")"
+[[ -n "$guest_home" && -d "$guest_home" ]] || {
+  echo "Cannot resolve guest home for $guest_user." >&2
+  exit 1
+}
+
+exec > >(tee -a /var/log/kvm-agent-swarm.log) 2>&1
+echo "Configuring KVM-Agent swarm profile: role=$role network=$network"
+
+existing_network=""
+existing_roles=""
+if [[ -r "$marker" ]]; then
+  existing_network="$(sed -n 's/^network=//p' "$marker" | head -n 1)"
+  existing_roles="$(sed -n 's/^roles=//p' "$marker" | head -n 1)"
+fi
+if [[ -n "$existing_network" && "$existing_network" != "$network" ]]; then
+  echo "This guest already uses swarm network '$existing_network'; refusing to mix it with '$network'." >&2
+  exit 1
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+apt-get update
+apt-get install -y openssh-client openssh-server rsync ufw ca-certificates curl
+
+case "$network" in
+  tailscale)
+    if ! command -v tailscale >/dev/null 2>&1; then
+      installer="$(mktemp /var/lib/kvm-agent/tailscale-install.XXXXXXXX)"
+      trap 'rm -f -- "${installer:-}"' EXIT
+      curl --proto '=https' --tlsv1.2 --fail --show-error --location --retry 3 \
+        https://tailscale.com/install.sh --output "$installer"
+      chown root:root "$installer"
+      chmod 0500 "$installer"
+      bash "$installer"
+      rm -f -- "$installer"
+      trap - EXIT
+    fi
+    systemctl enable --now tailscaled.service
+    # Keep the normal private-range egress block intact. Only tailnet-assigned
+    # addresses and MagicDNS are reachable through tailscale0; subnet routes
+    # and exit nodes are deliberately not enabled by provisioning.
+    if ! ufw show added | grep -Fq 'ufw allow out on tailscale0 to 100.64.0.0/10'; then
+      ufw insert 1 allow out on tailscale0 to 100.64.0.0/10 >/dev/null
+    fi
+    if [[ "$role" == worker || "$role" == both ]]; then
+      if ! ufw show added | grep -Fq 'ufw allow in on tailscale0 from 100.64.0.0/10 to any port 22 proto tcp'; then
+        ufw insert 1 allow in on tailscale0 from 100.64.0.0/10 \
+          to any port 22 proto tcp >/dev/null
+      fi
+    fi
+    ;;
+  wireguard)
+    apt-get install -y wireguard-tools
+    # WireGuard peer addresses are selected by the operator later. Interface-
+    # scoped rules preserve the default private-range block on every other
+    # interface and permit only authenticated wg0 peers once configured.
+    if ! ufw show added | grep -Fq 'ufw allow out on wg0'; then
+      ufw insert 1 allow out on wg0 >/dev/null
+    fi
+    if [[ "$role" == worker || "$role" == both ]]; then
+      if ! ufw show added | grep -Fq 'ufw allow in on wg0 to any port 22 proto tcp'; then
+        ufw insert 1 allow in on wg0 to any port 22 proto tcp >/dev/null
+      fi
+    fi
+    ;;
+esac
+
+systemctl enable --now ssh.service
+ufw --force enable >/dev/null
+
+has_role() {
+  local wanted="$1"
+  [[ ",${existing_roles}," == *",${wanted},"* ]]
+}
+
+add_role() {
+  local wanted="$1"
+  if ! has_role "$wanted"; then
+    if [[ -n "$existing_roles" ]]; then
+      existing_roles="${existing_roles},${wanted}"
+    else
+      existing_roles="$wanted"
+    fi
+  fi
+}
+
+if [[ "$role" == manager || "$role" == both ]]; then
+  add_role manager
+  install -d -o "$guest_user" -g "$guest_group" -m 0700 "$guest_home/.ssh"
+  manager_key="$guest_home/.ssh/id_ed25519_kvm_agent_swarm"
+  if [[ ! -e "$manager_key" && ! -e "${manager_key}.pub" ]]; then
+    runuser -u "$guest_user" -- ssh-keygen -q -t ed25519 -N '' \
+      -C "kvm-agent-swarm-manager@$(hostname)" -f "$manager_key"
+  fi
+  chown "$guest_user:$guest_group" "$manager_key" "${manager_key}.pub"
+  chmod 0600 "$manager_key"
+  chmod 0644 "${manager_key}.pub"
+  manager_known_hosts="$guest_home/.ssh/known_hosts_kvm_agent_swarm"
+  touch "$manager_known_hosts"
+  chown "$guest_user:$guest_group" "$manager_known_hosts"
+  chmod 0600 "$manager_known_hosts"
+
+  cat > /usr/local/bin/kvm-agent-swarm-public-key <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cat '$manager_key.pub'
+EOF
+  chown root:root /usr/local/bin/kvm-agent-swarm-public-key
+  chmod 0755 /usr/local/bin/kvm-agent-swarm-public-key
+fi
+
+if [[ "$role" == worker || "$role" == both ]]; then
+  if id "$worker_user" >/dev/null 2>&1; then
+    if ! has_role worker; then
+      echo "Reserved account '$worker_user' already exists but was not created by a completed KVM-Agent swarm profile." >&2
+      echo "Review or remove that account before retrying; it will not be adopted automatically." >&2
+      exit 1
+    fi
+    actual_worker_home="$(getent passwd "$worker_user" | awk -F: '{print $6}')"
+    [[ "$actual_worker_home" == "$worker_home" ]] || {
+      echo "Existing '$worker_user' account has unexpected home: $actual_worker_home" >&2
+      exit 1
+    }
+  else
+    useradd --create-home --shell /bin/bash --comment 'KVM-Agent swarm worker' \
+      "$worker_user"
+  fi
+  add_role worker
+  passwd --lock "$worker_user" >/dev/null
+  usermod --shell /bin/bash "$worker_user"
+  for privileged_group in sudo adm libvirt kvm docker lxd; do
+    if getent group "$privileged_group" >/dev/null 2>&1; then
+      gpasswd --delete "$worker_user" "$privileged_group" >/dev/null 2>&1 || true
+    fi
+  done
+  install -d -o "$worker_user" -g "$worker_user" -m 0750 \
+    "$worker_home/jobs"
+
+  # Keep manager authorization outside the worker-owned home so jobs running as
+  # agent-worker cannot add persistent SSH keys. OpenSSH accepts a root-owned
+  # AuthorizedKeysFile selected by this per-user Match block.
+  install -d -o root -g root -m 0755 /etc/ssh/authorized_keys
+  touch "/etc/ssh/authorized_keys/${worker_user}"
+  chown root:root "/etc/ssh/authorized_keys/${worker_user}"
+  chmod 0644 "/etc/ssh/authorized_keys/${worker_user}"
+  cat > /etc/ssh/sshd_config.d/95-kvm-agent-swarm-worker.conf <<'SSHD_WORKER'
+Match User agent-worker
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    PubkeyAuthentication yes
+    AuthorizedKeysFile /etc/ssh/authorized_keys/agent-worker
+    DisableForwarding yes
+    X11Forwarding no
+    PermitTTY no
+    PermitTunnel no
+    PermitUserRC no
+SSHD_WORKER
+  chown root:root /etc/ssh/sshd_config.d/95-kvm-agent-swarm-worker.conf
+  chmod 0644 /etc/ssh/sshd_config.d/95-kvm-agent-swarm-worker.conf
+  sshd -t
+  systemctl reload ssh.service
+
+  cat > /usr/local/sbin/kvm-agent-swarm-authorize <<'AUTHORIZE_SCRIPT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+worker_user="agent-worker"
+authorized_keys="/etc/ssh/authorized_keys/${worker_user}"
+
+install -d -o root -g root -m 0755 /etc/ssh/authorized_keys
+touch "$authorized_keys"
+chown root:root "$authorized_keys"
+chmod 0644 "$authorized_keys"
+
+case "${1:-}" in
+  --list)
+    cat "$authorized_keys"
+    exit 0
+    ;;
+  --clear)
+    : > "$authorized_keys"
+    chown root:root "$authorized_keys"
+    chmod 0644 "$authorized_keys"
+    echo "All manager keys removed from the '${worker_user}' account."
+    exit 0
+    ;;
+  "") ;;
+  *)
+    echo "Usage: sudo kvm-agent-swarm-authorize [--list|--clear]" >&2
+    echo "Without an option, provide exactly one ssh-ed25519 public key on standard input." >&2
+    exit 2
+    ;;
+esac
+
+temporary_key="$(mktemp)"
+trap 'rm -f -- "$temporary_key"' EXIT
+cat > "$temporary_key"
+line_count="$(grep -cve '^[[:space:]]*$' "$temporary_key" || true)"
+[[ "$line_count" == 1 ]] || {
+  echo "Provide exactly one SSH public key on standard input." >&2
+  exit 2
+}
+key_line="$(grep -ve '^[[:space:]]*$' "$temporary_key")"
+case "$key_line" in
+  ssh-ed25519\ *) ;;
+  *) echo "Only an ssh-ed25519 manager public key is accepted." >&2; exit 2 ;;
+esac
+ssh-keygen -l -f "$temporary_key" >/dev/null
+
+entry="restrict ${key_line}"
+if ! grep -Fqx -- "$entry" "$authorized_keys"; then
+  printf '%s\n' "$entry" >> "$authorized_keys"
+fi
+chown root:root "$authorized_keys"
+chmod 0644 "$authorized_keys"
+echo "Manager key authorized for the non-sudo '${worker_user}' account."
+AUTHORIZE_SCRIPT
+  chown root:root /usr/local/sbin/kvm-agent-swarm-authorize
+  chmod 0755 /usr/local/sbin/kvm-agent-swarm-authorize
+fi
+
+install -d -o root -g root -m 0755 /var/lib/kvm-agent
+{
+  printf 'network=%s\n' "$network"
+  printf 'roles=%s\n' "$existing_roles"
+  printf 'configured=%s\n' "$(date --utc --iso-8601=seconds)"
+} > "$marker"
+chmod 0644 "$marker"
+
+cat > /usr/local/bin/kvm-agent-swarm-status <<'STATUS_SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+cat /var/lib/kvm-agent/swarm-profile
+if command -v tailscale >/dev/null 2>&1; then
+  echo
+  tailscale status 2>/dev/null || true
+fi
+if command -v wg >/dev/null 2>&1; then
+  echo
+  sudo -n wg show 2>/dev/null || true
+fi
+if command -v kvm-agent-swarm-public-key >/dev/null 2>&1; then
+  echo
+  echo 'Manager public key:'
+  kvm-agent-swarm-public-key
+fi
+STATUS_SCRIPT
+chown root:root /usr/local/bin/kvm-agent-swarm-status
+chmod 0755 /usr/local/bin/kvm-agent-swarm-status
+
+apt-get clean
+echo "KVM-Agent swarm profile configured. Run kvm-agent-swarm-status for details."
+SWARM_SCRIPT
+  chmod 0700 "$destination"
+}
+
 while (($# > 0)); do
   case "$1" in
     --name)
@@ -464,12 +905,40 @@ while (($# > 0)); do
       WITH_FORMAL_METHODS="yes"
       shift
       ;;
+    --swarm-role)
+      (($# >= 2)) || die "--swarm-role requires a value."
+      [[ "$ADD_SWARM_ROLE_SET" == "no" ]] || die \
+        "--swarm-role and --add-swarm cannot be combined."
+      SWARM_ROLE_OPTION_SET="yes"
+      SWARM_ROLE="$2"
+      shift 2
+      ;;
+    --swarm-network)
+      (($# >= 2)) || die "--swarm-network requires a value."
+      SWARM_NETWORK="$2"
+      shift 2
+      ;;
+    --add-swarm)
+      (($# >= 2)) || die "--add-swarm requires a role."
+      [[ "$SWARM_ROLE_OPTION_SET" == "no" ]] || die \
+        "--add-swarm and --swarm-role cannot be combined."
+      [[ "$ADD_SWARM_ROLE_SET" == "no" ]] || die \
+        "--add-swarm may be specified only once."
+      select_operation "add-swarm" "--add-swarm"
+      ADD_SWARM_ROLE_SET="yes"
+      SWARM_ROLE="$2"
+      shift 2
+      ;;
+    --resize-existing)
+      select_operation "resize" "--resize-existing"
+      shift
+      ;;
     --replace-existing)
       REPLACE_EXISTING="yes"
       shift
       ;;
     --finalize-existing)
-      OPERATION="finalize"
+      select_operation "finalize" "--finalize-existing"
       shift
       ;;
     -h|--help)
@@ -482,6 +951,21 @@ while (($# > 0)); do
   esac
 done
 
+case "$SWARM_ROLE" in
+  none|manager|worker|both) ;;
+  *) die "Swarm role must be 'manager', 'worker', or 'both'." ;;
+esac
+case "$SWARM_NETWORK" in
+  ""|tailscale|wireguard) ;;
+  *) die "Swarm network must be 'tailscale' or 'wireguard'." ;;
+esac
+if [[ "$SWARM_ROLE" != "none" && -z "$SWARM_NETWORK" ]]; then
+  SWARM_NETWORK="tailscale"
+fi
+if [[ "$SWARM_ROLE" == "none" && -n "$SWARM_NETWORK" ]]; then
+  die "--swarm-network requires --swarm-role or --add-swarm."
+fi
+
 [[ $EUID -ne 0 ]] || die \
   "Run this script as your ordinary host account, not as root or through sudo."
 [[ -t 0 ]] || die "An interactive terminal is required for password prompts."
@@ -492,6 +976,8 @@ done
 [[ "$GUEST_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die \
   "Guest user must be a valid lowercase Linux account name."
 [[ "$GUEST_USER" != "root" ]] || die "The guest login name cannot be root."
+[[ "$GUEST_USER" != "agent-worker" ]] || die \
+  "The guest login name 'agent-worker' is reserved for the optional non-sudo swarm worker account."
 if [[ "$OPERATION" == "finalize" ]]; then
   [[ "$REPLACE_EXISTING" == "no" ]] || die \
     "--finalize-existing and --replace-existing cannot be used together."
@@ -499,8 +985,31 @@ if [[ "$OPERATION" == "finalize" ]]; then
       && "$DISK_GB" == "$DEFAULT_DISK_GB" \
       && "$WAIT_FOR_GUEST" == "yes" \
       && "$RESTRICT_PRIVATE_NETWORKS" == "yes" \
-      && "$WITH_FORMAL_METHODS" == "no" ]] || die \
+      && "$WITH_FORMAL_METHODS" == "no" \
+      && "$SWARM_ROLE" == "none" \
+      && -z "$SWARM_NETWORK" ]] || die \
     "--finalize-existing accepts only --name and --user."
+fi
+if [[ "$OPERATION" == "add-swarm" ]]; then
+  [[ "$REPLACE_EXISTING" == "no" \
+      && -z "$RAM_MB" && -z "$VCPUS" \
+      && "$DISK_GB" == "$DEFAULT_DISK_GB" \
+      && "$WAIT_FOR_GUEST" == "yes" \
+      && "$RESTRICT_PRIVATE_NETWORKS" == "yes" \
+      && "$WITH_FORMAL_METHODS" == "no" ]] || die \
+    "--add-swarm accepts only --name, --user, and --swarm-network."
+fi
+if [[ "$OPERATION" == "resize" ]]; then
+  [[ "$REPLACE_EXISTING" == "no" \
+      && "$DISK_GB" == "$DEFAULT_DISK_GB" \
+      && "$WAIT_FOR_GUEST" == "yes" \
+      && "$RESTRICT_PRIVATE_NETWORKS" == "yes" \
+      && "$WITH_FORMAL_METHODS" == "no" \
+      && "$SWARM_ROLE" == "none" \
+      && -z "$SWARM_NETWORK" ]] || die \
+    "--resize-existing accepts only --name, --memory, and/or --vcpus."
+  [[ -n "$RAM_MB" || -n "$VCPUS" ]] || die \
+    "--resize-existing requires --memory and/or --vcpus."
 fi
 positive_integer "$DISK_GB" || die "--disk must be a positive integer."
 ((DISK_GB >= 50)) || die "Use at least 50 GiB for the graphical guest."
@@ -549,21 +1058,51 @@ HOST_CPUS="$(nproc)"
 positive_integer "$HOST_RAM_MB" || die "Cannot determine host memory."
 positive_integer "$HOST_CPUS" || die "Cannot determine host CPU count."
 
+if [[ "$OPERATION" == "add-swarm" ]]; then
+  log "Authorising post-provisioning swarm setup"
+  sudo -v
+  add_swarm_to_managed_guest
+  log "KVM-Agent swarm setup completed"
+  printf 'Guest address: %s\n' "$GUEST_IP"
+  exit 0
+fi
+
+if [[ "$OPERATION" == "resize" ]]; then
+  if [[ -n "$RAM_MB" ]]; then
+    positive_integer "$RAM_MB" || die "--memory must be a positive integer."
+    ((RAM_MB >= 6144)) || die \
+      "The graphical agent guest needs at least 6144 MiB."
+    ((RAM_MB + 2048 <= HOST_RAM_MB)) || die \
+      "Leave at least 2 GiB of RAM for the Ubuntu host (host: ${HOST_RAM_MB} MiB)."
+  fi
+  if [[ -n "$VCPUS" ]]; then
+    positive_integer "$VCPUS" || die "--vcpus must be a positive integer."
+    ((VCPUS <= HOST_CPUS)) || die \
+      "Guest vCPUs (${VCPUS}) cannot exceed host CPUs (${HOST_CPUS})."
+  fi
+  log "Authorising persistent VM resource change"
+  sudo -v
+  resize_managed_guest
+  exit 0
+fi
+
 if [[ -z "$RAM_MB" ]]; then
-  RAM_MB=$((HOST_RAM_MB / 2))
-  ((RAM_MB < 8192)) && RAM_MB=8192
-  ((RAM_MB > 16384)) && RAM_MB=16384
+  RAM_MB=$((HOST_RAM_MB * 3 / 4))
+  ((RAM_MB > 32768)) && RAM_MB=32768
+  ((RAM_MB < 6144)) && RAM_MB=6144
+  ((RAM_MB + 2048 > HOST_RAM_MB)) && RAM_MB=$((HOST_RAM_MB - 2048))
 fi
 if [[ -z "$VCPUS" ]]; then
-  VCPUS=$((HOST_CPUS / 2))
+  VCPUS=$((HOST_CPUS * 3 / 4))
   ((VCPUS < 2)) && VCPUS=2
-  ((VCPUS > 8)) && VCPUS=8
+  ((VCPUS > 16)) && VCPUS=16
+  ((VCPUS > HOST_CPUS)) && VCPUS="$HOST_CPUS"
 fi
 
 positive_integer "$RAM_MB" || die "--memory must be a positive integer."
 positive_integer "$VCPUS" || die "--vcpus must be a positive integer."
 ((RAM_MB >= 6144)) || die "The graphical agent guest needs at least 6144 MiB."
-((RAM_MB + 2048 < HOST_RAM_MB)) || die \
+((RAM_MB + 2048 <= HOST_RAM_MB)) || die \
   "Leave at least 2 GiB of RAM for the Ubuntu host (host: ${HOST_RAM_MB} MiB)."
 ((VCPUS <= HOST_CPUS)) || die \
   "Guest vCPUs (${VCPUS}) cannot exceed host CPUs (${HOST_CPUS})."
@@ -592,6 +1131,12 @@ if [[ "$WITH_FORMAL_METHODS" == "yes" ]]; then
   printf 'Time warning:   formal-methods provisioning may take several hours\n'
 else
   printf 'Formal tools:   not requested (use --formal-methods to include them)\n'
+fi
+if [[ "$SWARM_ROLE" != "none" ]]; then
+  printf 'Swarm profile:  %s over %s\n' "$SWARM_ROLE" "$SWARM_NETWORK"
+  printf 'Swarm note:     network enrollment and peer authorization remain manual\n'
+else
+  printf 'Swarm profile:  not requested (see docs/swarm.md)\n'
 fi
 
 log "Authorising host setup"
@@ -627,6 +1172,8 @@ sudo usermod -aG libvirt -- "$HOST_USER"
   "/dev/kvm is unavailable. Enable Intel VT-x or AMD-V in firmware and reboot."
 
 WORK_DIR="$(mktemp -d)"
+write_swarm_provision_script "$WORK_DIR/swarm-provision.sh"
+SWARM_PROVISION_B64="$(base64 -w 0 "$WORK_DIR/swarm-provision.sh")"
 
 if ! sudo virsh --connect "$LIBVIRT_URI" net-info "$LIBVIRT_NETWORK" \
     >/dev/null 2>&1; then
@@ -781,8 +1328,11 @@ else
 fi
 chmod 0600 "$SSH_PRIVATE_KEY"
 chmod 0644 "$SSH_PUBLIC_KEY_FILE"
-printf 'formal-methods=%s\n' "$WITH_FORMAL_METHODS" \
-  > "$PROVISIONING_MODE_FILE"
+{
+  printf 'formal-methods=%s\n' "$WITH_FORMAL_METHODS"
+  printf 'swarm-role=%s\n' "$SWARM_ROLE"
+  printf 'swarm-network=%s\n' "${SWARM_NETWORK:-none}"
+} > "$PROVISIONING_MODE_FILE"
 chmod 0600 "$PROVISIONING_MODE_FILE"
 
 # This point is only reached when no domain of this name exists, so any host
@@ -833,6 +1383,8 @@ restrict_private_networks="${2:?private-network policy is required}"
 gateway_address="${3:?gateway address is required}"
 with_formal_methods="${4:?formal-methods selection is required}"
 requested_disk_gib="${5:?requested disk size is required}"
+swarm_role="${6:?swarm role is required}"
+swarm_network="${7:?swarm network is required}"
 guest_home="$(getent passwd "$guest_user" | awk -F: '{print $6}')"
 guest_group="$(id -gn "$guest_user")"
 guest_path="${guest_home}/.elan/bin:${guest_home}/.ghcup/bin:${guest_home}/.local/bin:${guest_home}/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -1048,7 +1600,7 @@ if [[ "$with_formal_methods" == "yes" ]]; then
 fi
 
 systemctl enable --now qemu-guest-agent.service
-systemctl enable ssh.service
+systemctl enable --now ssh.service
 systemctl set-default graphical.target
 
 echo "Configuring the guest firewall before third-party installation..."
@@ -1096,6 +1648,11 @@ fi
 ufw --force enable >/dev/null
 systemctl enable ufw.service
 ufw status verbose
+
+if [[ "$swarm_role" != "none" ]]; then
+  /usr/local/sbin/kvm-agent-swarm-provision \
+    "$swarm_role" "$swarm_network" "$guest_user"
+fi
 
 install -d -o "$guest_user" -g "$guest_group" -m 0755 \
   "$guest_home/.local" \
@@ -1414,8 +1971,14 @@ write_files:
     encoding: b64
     content: ${GUEST_PROVISION_B64}
 
+  - path: /usr/local/sbin/kvm-agent-swarm-provision
+    owner: root:root
+    permissions: "0700"
+    encoding: b64
+    content: ${SWARM_PROVISION_B64}
+
 runcmd:
-  - ["/usr/local/sbin/kvm-agent-provision", "${GUEST_USER}", "${RESTRICT_PRIVATE_NETWORKS}", "${GATEWAY_ADDRESS}", "${WITH_FORMAL_METHODS}", "${DISK_GB}"]
+  - ["/usr/local/sbin/kvm-agent-provision", "${GUEST_USER}", "${RESTRICT_PRIVATE_NETWORKS}", "${GATEWAY_ADDRESS}", "${WITH_FORMAL_METHODS}", "${DISK_GB}", "${SWARM_ROLE}", "${SWARM_NETWORK:-none}"]
 
 final_message: "KVM-Agent cloud-init finished after \$UPTIME seconds; verify cloud-init status."
 EOF
@@ -1498,6 +2061,26 @@ print_next_steps() {
     printf '  code     lean      lake        isabelle\n'
     printf '  ghc      ghci      cabal       hlint\n'
     printf 'For Isabelle/HOL, run: isabelle jedit\n'
+  fi
+  if [[ "$SWARM_ROLE" != "none" ]]; then
+    printf '\nOptional swarm profile (%s over %s):\n' \
+      "$SWARM_ROLE" "$SWARM_NETWORK"
+    printf '  kvm-agent-swarm-status\n'
+    if [[ "$SWARM_NETWORK" == "tailscale" ]]; then
+      printf 'Join the guest to the intended tailnet manually with:\n'
+      printf '  sudo tailscale up\n'
+    else
+      printf 'Create and review /etc/wireguard/wg0.conf before enabling wg-quick@wg0.\n'
+    fi
+    if [[ "$SWARM_ROLE" == "manager" || "$SWARM_ROLE" == "both" ]]; then
+      printf 'Display the dedicated manager public key with:\n'
+      printf '  kvm-agent-swarm-public-key\n'
+    fi
+    if [[ "$SWARM_ROLE" == "worker" || "$SWARM_ROLE" == "both" ]]; then
+      printf 'Authorize one manager key from standard input with:\n'
+      printf '  sudo kvm-agent-swarm-authorize\n'
+    fi
+    printf 'Complete the least-privilege network policy in docs/swarm.md.\n'
   fi
 }
 

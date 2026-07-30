@@ -35,6 +35,11 @@ VS Code, and the official Lean and Haskell extensions inside the same
 graphical guest. It does not restore the older repository architecture or its
 larger prover collection.
 
+An additional opt-in manager/worker profile can prepare VMs on different
+physical hosts to submit long jobs over Tailscale or WireGuard plus ordinary
+OpenSSH. It is intentionally not enabled for normal users; see
+[Cross-host manager/worker VMs](docs/swarm.md).
+
 The same command can resume interrupted finalization or replace a disposable
 VM. A small removal helper remains available when removal without rebuilding
 is wanted:
@@ -42,6 +47,7 @@ is wanted:
 ```bash
 ./setup-kvm-agent.sh --finalize-existing --name kvm-agent
 ./setup-kvm-agent.sh --replace-existing --name kvm-agent
+./setup-kvm-agent.sh --resize-existing --name kvm-agent --memory 24576 --vcpus 12
 ./remove-kvm-agent.sh
 ```
 
@@ -97,10 +103,13 @@ From the ordinary Ubuntu host account, the script:
    Isabelle2025-2/HOL from its checksum-verified official Linux archive,
    GHC/Cabal/HLS through GHCup, HLint through Cabal, and VS Code with the
    official Lean and Haskell extensions;
-9. before any vendor installer runs, configures a guest firewall that denies
+9. when `--swarm-role` is selected, installs either Tailscale or WireGuard
+   support, a dedicated manager SSH key and/or a locked-down non-sudo worker
+   account, without enrolling the VM or authorizing peers automatically;
+10. before any vendor installer runs, configures a guest firewall that denies
    unsolicited inbound traffic and, by default, outbound traffic to private
    and link-local address ranges, while leaving internet access open; and
-10. verifies each command, keeps Ollama bound to guest loopback
+11. verifies each command, keeps Ollama bound to guest loopback
    (`127.0.0.1:11434`), disables future cloud-init runs, and destroys the
    cloud-init seed once provisioning is done.
 
@@ -111,6 +120,8 @@ It deliberately does **not**:
 - download Ollama model weights;
 - mount the host home directory or a project directory in the guest;
 - configure USB passthrough, SSH-agent forwarding, or a LAN-facing VM console;
+- enroll a VM into Tailscale, configure WireGuard peers, or connect physical
+  hosts to a swarm overlay;
 - choose a model provider; or
 - install Agda, Rocq/OCaml, HOL4, HOL Light, Mathlib, or the Archive of Formal
   Proofs.
@@ -131,11 +142,13 @@ The supported primary path is:
 | Network | Internet access during initial provisioning |
 | Display | Local graphical Ubuntu session for `virt-manager` |
 | Disk | 120 GiB guest virtual disk by default; at least 12 GiB free on the host, or 30 GiB with `--formal-methods` |
-| Memory | 8 GiB guest recommended; keep at least 2 GiB for the host |
+| Memory | 8 GiB guest recommended; the default keeps at least 2 GiB for the host |
 
-The default memory is half of host RAM, clamped to 8–16 GiB. The default vCPU
-count is half of the host CPUs, clamped to 2–8. A 16 GiB host therefore gets an
-8 GiB VM, while a 32 GiB host gets a 16 GiB VM.
+The default memory is 75% of host RAM, capped at 32 GiB while retaining at
+least 2 GiB for the host. The default vCPU count is 75% of the host's logical
+CPUs, capped at 16. Thus a 16 GiB/8-thread host normally gives the guest about
+12 GiB and 6 vCPUs, while a 64 GiB/32-thread host gives it 32 GiB and 16
+vCPUs. Explicit `--memory` and `--vcpus` values still override these defaults.
 
 ## Quick start
 
@@ -213,6 +226,11 @@ scope, editor behavior, and update model.
                    traffic. Only for an internal mirror or model endpoint
 --formal-methods   Add Lean, Isabelle/HOL, Haskell tooling, VS Code, and the
                    official Lean/Haskell extensions inside the guest
+--swarm-role ROLE  Prepare the guest as "manager", "worker", or "both"
+--swarm-network N  Use "tailscale" (default) or "wireguard" for swarm traffic
+--add-swarm ROLE   Add a swarm role to an already-provisioned managed VM
+--resize-existing  Change persistent RAM and/or vCPU allocation of a powered-
+                   off existing VM without deleting it
 --replace-existing Remove the selected existing VM after exact-name
                    confirmation, then build it again
 --finalize-existing
@@ -258,6 +276,42 @@ VM names use lowercase letters, numbers, and hyphens. By default, the script
 refuses to replace an existing libvirt domain or disk. `--replace-existing`
 shows the exact removal plan, requires the VM name to be typed, retains the
 shared Ubuntu cache and any manually attached extra disks, then rebuilds.
+
+## Change RAM or vCPUs without rebuilding
+
+Memory and vCPU allocation can be changed without deleting the VM or its disk.
+Shut the guest down normally, then run, for example:
+
+```bash
+./setup-kvm-agent.sh \
+  --resize-existing \
+  --name kvm-agent \
+  --memory 24576 \
+  --vcpus 12
+```
+
+Either `--memory` or `--vcpus` may be omitted. The helper changes the persistent
+libvirt configuration and the new values apply at the next start. It refuses a
+running VM, a VM with a managed-save image, RAM that leaves less than 2 GiB for
+the host, or more vCPUs than the host reports. If virt-manager/libvirt has saved
+the running state, start the VM and perform a normal full shutdown first; this
+prevents an old saved state from restoring the previous resource configuration.
+No guest filesystem, cloud-init state, or project data is changed. A vCPU count
+is the number of virtual logical CPUs visible to the
+guest, not a guaranteed exclusive CPU quota; host scheduling still determines
+actual execution time.
+
+Libvirt can sometimes hot-plug resources into specially prepared running
+guests, but increasing maximum memory or CPU topology live is not uniformly
+supported. KVM-Agent therefore uses the predictable powered-off path instead.
+
+## Optional cross-host manager/worker VMs
+
+Most users can ignore this feature. `--swarm-role manager|worker|both` prepares
+an initial VM, and `--add-swarm` adds a role later; Tailscale is the default and
+raw WireGuard is optional. Provisioning does not enroll devices or authorize
+peers automatically. Read [Cross-host manager/worker VMs](docs/swarm.md) before
+enabling it, including the directional-access and risk guidance.
 
 ## Resume interrupted finalization
 
@@ -434,6 +488,7 @@ long-lived keys, production data, or expensive API credentials.
 - [Credential handling](docs/credentials.md)
 - [Agent tools and model services](docs/agent-tools-and-model-services.md)
 - [Reduced formal-methods environment](docs/formal-methods.md)
+- [Cross-host manager/worker VMs](docs/swarm.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Primary upstream references](docs/references.md)
 - [Disclaimer](DISCLAIMER.md)
@@ -445,4 +500,4 @@ security product. The script has static and mocked workflow tests in this
 repository; creating a real VM still depends on host firmware, Ubuntu mirrors,
 libvirt, and moving third-party installers. Report failures with the host
 release, script options, `cloud-init status --long`, and the relevant tail of
-`/var/log/kvm-agent-provision.log`.
+`/var/log/kvm-agent-provision.log` or `/var/log/kvm-agent-swarm.log`.

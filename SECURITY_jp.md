@@ -125,8 +125,10 @@ account が完全に攻撃者の制御下にあっても成立します。
 
 - guest firewall が private・link-local address range（通常は host、他 guest、
   物理 LAN を含む）への外向き通信を遮断する。internet 接続は開いたまま
-  （[ネットワークモデル](#ネットワークモデル)）。
-- inbound SSH は libvirt gateway からのみ受け付ける。
+  （[ネットワークモデル](#ネットワークモデル)）。明示的に選択した swarm profile は
+  overlay interface だけに exception を追加する。
+- inbound SSH は通常 libvirt gateway からのみ受け付ける。Opt-in の swarm worker は
+  選択した overlay interface 上でも受け付ける。
 - root login と SSH password login を無効にする。
 - SSH agent forwarding と X11 forwarding を無効にする。
 - Ollama は guest loopback だけで待ち受ける。
@@ -170,6 +172,14 @@ address space は遮断しません。社内 mirror や model endpoint のため
 への通信が本当に必要な場合だけ `--allow-lan` を使ってください。この option が省く
 のは outbound deny rule だけです。UFW は有効なままで、未要求の inbound 通信は拒否
 され、復旧 SSH は引き続き libvirt gateway だけに限定されます。
+
+任意の manager/worker profile は一般 LAN access を有効にしません。Tailscale では
+`tailscale0` 上の Tailscale node address への outbound exception、WireGuard では明示的に
+構成した peer 用の `wg0` outbound exception だけを追加します。Worker には同じ overlay
+interface 上の inbound TCP 22 exception も追加します。Guest-local UFW は host-enforced
+boundary ではないため、directional Tailscale grant または narrow WireGuard peer route が
+引き続き必要です。追加される lateral-movement risk と endpoint trust model は
+[任意の cross-host manager/worker VM](docs/swarm_jp.md)を参照してください。
 
 この rule 群は guest 内部にあるため、境界ではなく既定値です。強制が必要な場合は、
 同じ policy を guest が編集できない libvirt `nwfilter` として guest interface に

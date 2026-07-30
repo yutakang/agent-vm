@@ -16,10 +16,12 @@ mkdir -p \
   "$TEMP_DIR/bin" \
   "$TEMP_DIR/home" \
   "$TEMP_DIR/images/vms" \
+  "$TEMP_DIR/keyrings" \
   "$TEMP_DIR/state"
 chmod 0777 "$TEMP_DIR/home" "$TEMP_DIR/images" \
   "$TEMP_DIR/images/vms" "$TEMP_DIR/state"
 touch "$TEMP_DIR/dev-kvm"
+touch "$TEMP_DIR/keyrings/ubuntu-cloudimage-keyring.gpg"
 
 cat > "$TEMP_DIR/os-release" <<'EOF'
 ID=ubuntu
@@ -56,6 +58,7 @@ sed -i \
   -e "s#/etc/os-release#${TEMP_DIR}/os-release#g" \
   -e "s#/dev/kvm#${TEMP_DIR}/dev-kvm#g" \
   -e "s#/proc/meminfo#${TEMP_DIR}/meminfo#g" \
+  -e "s#/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg#${TEMP_DIR}/keyrings/ubuntu-cloudimage-keyring.gpg#g" \
   -e "s#readonly IMAGE_DIR=\"/var/lib/libvirt/images/kvm-agent\"#readonly IMAGE_DIR=\"${TEMP_DIR}/images\"#" \
   -e '/^\[\[ $EUID -ne 0 \]\] || die \\$/,+1c\true # root-account check is tested separately' \
   -e 's/^\[\[ -t 0 \]\] || die .*$/true # interactive-terminal check covered separately/' \
@@ -97,6 +100,29 @@ EOF
 cat > "$TEMP_DIR/bin/nproc" <<'EOF'
 #!/usr/bin/env bash
 echo 8
+EOF
+
+cat > "$TEMP_DIR/bin/ssh-keygen" <<'EOF'
+#!/usr/bin/env bash
+output=""
+while (($# > 0)); do
+  case "$1" in
+    -f)
+      output="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+[[ -n "$output" ]] || exit 1
+mkdir -p "$(dirname -- "$output")"
+printf 'mock-private-key\n' > "$output"
+printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockKey kvm-agent-mock\n' \
+  > "${output}.pub"
+chmod 0600 "$output"
+chmod 0644 "${output}.pub"
 EOF
 
 cat > "$TEMP_DIR/bin/virsh" <<'EOF'
@@ -155,7 +181,36 @@ OUTPUT
     touch "$MOCK_STATE/seed-ejected"
     ;;
   dominfo)
-    [[ -f "$MOCK_STATE/domain-defined" ]]
+    [[ -f "$MOCK_STATE/domain-defined" ]] || exit 1
+    cat <<OUTPUT
+Id:             -
+Name:           mock-agent
+State:          shut off
+Managed save:   $(if [[ -f "$MOCK_STATE/managed-save" ]]; then echo yes; else echo no; fi)
+OUTPUT
+    ;;
+  domstate)
+    [[ -f "$MOCK_STATE/domain-defined" ]] || exit 1
+    echo "shut off"
+    ;;
+  dumpxml)
+    [[ -f "$MOCK_STATE/domain-defined" ]] || exit 1
+    cat <<'OUTPUT'
+<domain type='kvm'>
+  <name>mock-agent</name>
+  <memory unit='MiB'>8192</memory>
+  <currentMemory unit='MiB'>8192</currentMemory>
+  <vcpu current='2'>2</vcpu>
+</domain>
+OUTPUT
+    ;;
+  vcpucount)
+    [[ -f "$MOCK_STATE/domain-defined" ]] || exit 1
+    echo 2
+    ;;
+  setmaxmem|setmem|setvcpus)
+    [[ -f "$MOCK_STATE/domain-defined" ]] || exit 1
+    printf '%s %s\n' "$command_name" "$*" >> "$MOCK_STATE/resource-changes"
     ;;
   domifaddr)
     if [[ -f "$MOCK_STATE/rebooted" ]]; then
@@ -377,7 +432,7 @@ grep -Fq "resize $TEMP_DIR/images/vms/mock-agent.qcow2 120G" \
 grep -Fxq "formal-methods=yes" \
   "$TEMP_DIR/home/.local/share/kvm-agent/mock-agent/provisioning-mode"
 grep -Fq \
-  '["/usr/local/sbin/kvm-agent-provision", "agent", "yes", "192.168.122.1", "yes", "120"]' \
+  '["/usr/local/sbin/kvm-agent-provision", "agent", "yes", "192.168.122.1", "yes", "120", "none", "none"]' \
   "$MOCK_STATE/user-data"
 grep -Fq "growpart:" "$MOCK_STATE/user-data"
 grep -Fq "resize_rootfs: true" "$MOCK_STATE/user-data"
@@ -389,6 +444,67 @@ env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
 grep -Fq "KVM-Agent finalization completed" \
   "$TEMP_DIR/finalize-output"
 grep -Fq "192.168.122.51" "$TEMP_DIR/finalize-output"
+
+env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
+  "$TEMP_DIR/setup-under-test.sh" \
+    --add-swarm worker --name mock-agent --user agent \
+    --swarm-network tailscale \
+    > "$TEMP_DIR/add-swarm-output"
+grep -Fq "Adding the 'worker' swarm role with 'tailscale' networking" \
+  "$TEMP_DIR/add-swarm-output"
+grep -Fq "KVM-Agent swarm setup completed" "$TEMP_DIR/add-swarm-output"
+
+: > "$MOCK_STATE/resource-changes"
+env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
+  "$TEMP_DIR/setup-under-test.sh" \
+    --resize-existing --name mock-agent --memory 12288 --vcpus 4 \
+    > "$TEMP_DIR/resize-output"
+grep -Fq "Updated persistent resources for 'mock-agent'" \
+  "$TEMP_DIR/resize-output"
+grep -Fq "setmaxmem mock-agent 12288MiB --config" \
+  "$MOCK_STATE/resource-changes"
+grep -Fq "setmem mock-agent 12288MiB --config" \
+  "$MOCK_STATE/resource-changes"
+grep -Fq "setvcpus mock-agent 4 --maximum --config" \
+  "$MOCK_STATE/resource-changes"
+grep -Fq "setvcpus mock-agent 4 --config" \
+  "$MOCK_STATE/resource-changes"
+
+# A libvirt managed-save image can restore stale running-state resources, so
+# resizing must stop before making any persistent changes.
+touch "$MOCK_STATE/managed-save"
+: > "$MOCK_STATE/resource-changes"
+if env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
+    "$TEMP_DIR/setup-under-test.sh" \
+      --resize-existing --name mock-agent --memory 16384 \
+      > "$TEMP_DIR/resize-managed-save-output" 2>&1; then
+  echo "Resize unexpectedly accepted a managed-save image." >&2
+  exit 1
+fi
+grep -Fq "has a managed-save image" "$TEMP_DIR/resize-managed-save-output"
+[[ ! -s "$MOCK_STATE/resource-changes" ]]
+rm -f -- "$MOCK_STATE/managed-save"
+
+# Operation modes and initial-provisioning swarm roles must not silently
+# override each other based on option order.
+if env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
+    "$TEMP_DIR/setup-under-test.sh" \
+      --resize-existing --finalize-existing --name mock-agent --memory 8192 \
+      > "$TEMP_DIR/conflicting-operation-output" 2>&1; then
+  echo "Setup unexpectedly accepted conflicting operation modes." >&2
+  exit 1
+fi
+grep -Fq "cannot be combined with another operation mode" \
+  "$TEMP_DIR/conflicting-operation-output"
+
+if env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
+    "$TEMP_DIR/setup-under-test.sh" \
+      --swarm-role manager --add-swarm worker --name mock-agent \
+      > "$TEMP_DIR/conflicting-swarm-output" 2>&1; then
+  echo "Setup unexpectedly accepted --swarm-role with --add-swarm." >&2
+  exit 1
+fi
+grep -Fq "cannot be combined" "$TEMP_DIR/conflicting-swarm-output"
 
 # A connected SSH session whose remote command never returns must still be
 # bounded. This reproduces the v8 cloud-init status --wait hang without making

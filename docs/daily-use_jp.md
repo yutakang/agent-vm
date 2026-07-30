@@ -18,6 +18,26 @@ desktop から ACPI shutdown してください。`Force Off` は物理 machine 
 Script は VM autostart を有効にしません。Host 起動時に常に guest の memory 消費と
 network service 公開を行う必要がある場合だけ、`virt-manager` で有効にしてください。
 
+## 再作成せず既存 VM の resource を変更する
+
+Guest を通常どおり shutdown し、host から永続 RAM・vCPU 割当を変更します。
+
+```bash
+./setup-kvm-agent.sh --resize-existing \
+  --name kvm-agent \
+  --memory 24576 \
+  --vcpus 12
+```
+
+実行中 domain または managed-save image を持つ domain は拒否し、disk の削除・再作成は
+行いません。libvirt が running state を保存している場合は、VM を起動して通常の full
+shutdown を行ってから resize してください。変更後は既存 VM を通常どおり起動します。
+`--memory` または `--vcpus` の一方だけでも指定できます。Ubuntu host 用の RAM・CPU を
+残してください。Helper は host RAM を最低 2 GiB 残し、host が報告する CPU 数を超える
+vCPU 指定を拒否します。
+
+Guest hot-plug support に依存せず、powered-off configuration change を使う設計です。
+
 ## Clean snapshot
 
 最も価値がある snapshot は、次の状態で作ります。

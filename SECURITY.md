@@ -138,8 +138,10 @@ designed on the assumption that they still hold.
 
 - the guest firewall denies outbound traffic to private and link-local address
   ranges — normally covering the host, other guests, and the physical LAN —
-  while leaving internet access open (see [Network model](#network-model));
-- inbound SSH is accepted only from the libvirt gateway;
+  while leaving internet access open (see [Network model](#network-model)); an
+  explicitly selected swarm profile adds only overlay-interface exceptions;
+- inbound SSH is normally accepted only from the libvirt gateway; an opt-in
+  swarm worker additionally accepts it on the selected overlay interface;
 - root and SSH password login are disabled;
 - SSH agent forwarding and X11 forwarding are disabled;
 - Ollama listens only on guest loopback; and
@@ -186,6 +188,15 @@ routed public address space. Use `--allow-lan` when an internal mirror or model
 endpoint genuinely requires private-range egress. That option omits only these
 outbound deny rules: UFW remains enabled, unsolicited inbound traffic remains
 denied, and recovery SSH remains limited to the libvirt gateway.
+
+The optional manager/worker profile does not enable general LAN access. It adds
+an outbound exception on `tailscale0` for Tailscale node addresses, or on `wg0`
+for explicitly configured WireGuard peers. A worker also receives an inbound
+TCP 22 exception on that overlay interface. Directional Tailscale grants or
+narrow WireGuard peer routes remain necessary because the guest-local UFW rule
+is not a host-enforced boundary. See
+[Optional cross-host manager/worker VMs](docs/swarm.md) for the added lateral-
+movement risk and endpoint trust model.
 
 Because that rule set lives inside the guest, it is a default rather than a
 boundary. Where enforcement is required, express the same policy as a libvirt

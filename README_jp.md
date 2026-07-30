@@ -35,12 +35,18 @@ VM を作り、最小 Ubuntu デスクトップと要求された五つのツー
 Server、HLint、VS Code、および公式 Lean/Haskell extension だけを追加します。
 旧 repository の architecture や大きな prover collection は復活させません。
 
+さらに、異なる物理 host 上の VM 間で長時間 job を送る manager/worker profile も
+opt-in で利用できます。Tailscale または WireGuard と通常の OpenSSH を使います。
+通常利用者向けには有効化しません。詳細は
+[cross-host manager/worker VM](docs/swarm_jp.md)を参照してください。
+
 同じコマンドで、中断した finalization の再開や使い捨て VM の置換もできます。
 再作成せず削除だけを行う小さな helper も残しています。
 
 ```bash
 ./setup-kvm-agent.sh --finalize-existing --name kvm-agent
 ./setup-kvm-agent.sh --replace-existing --name kvm-agent
+./setup-kvm-agent.sh --resize-existing --name kvm-agent --memory 24576 --vcpus 12
 ./remove-kvm-agent.sh
 ```
 
@@ -96,10 +102,13 @@ system libvirt/KVM 境界を操作する GUI クライアントです。ホス�
    Isabelle2025-2/HOL を checksum 検証した公式 Linux archive から、
    GHC/Cabal/HLS を GHCup から、HLint を Cabal から導入し、さらに VS Code と
    公式 Lean/Haskell extension を導入する。
-9. ベンダー installer を実行する前に、未要求の inbound 通信と、既定では
+9. `--swarm-role` を選んだ場合、Tailscale または WireGuard support、manager
+   専用 SSH key、または password lock 済み non-sudo worker account を追加する。
+   VM の enrollment と peer authorization は自動化しない。
+10. ベンダー installer を実行する前に、未要求の inbound 通信と、既定では
    private・link-local address range への outbound 通信を拒否する guest firewall を
    構成する（インターネット接続は開いたまま）。
-10. 各コマンドを検証し、Ollama をゲストのループバック
+11. 各コマンドを検証し、Ollama をゲストのループバック
    (`127.0.0.1:11434`) に限定し、将来の cloud-init 実行を無効化してから、
    プロビジョニング完了後に cloud-init seed を破棄する。
 
@@ -111,6 +120,8 @@ system libvirt/KVM 境界を操作する GUI クライアントです。ホス�
 - Ollama のモデル重みをダウンロードする。
 - ホストのホームやプロジェクトディレクトリをゲストへマウントする。
 - USB パススルー、SSH agent forwarding、LAN 公開 VM コンソールを設定する。
+- VM を Tailscale へ enroll する、WireGuard peer を自動構成する、物理 host を
+  swarm overlay に参加させる。
 - モデルプロバイダーを選ぶ。
 - Agda、Rocq/OCaml、HOL4、HOL Light、Mathlib、Archive of Formal Proofs を
   導入する。
@@ -131,11 +142,12 @@ download、disk、provisioning 費用を負いません。
 | ネットワーク | 初回プロビジョニング中にインターネット接続 |
 | 表示 | `virt-manager` 用のローカル GUI Ubuntu セッション |
 | ディスク | Guest 仮想 disk は既定 120 GiB。Host 空きは最低 12 GiB、`--formal-methods` では 30 GiB |
-| メモリ | ゲスト 8 GiB を推奨。ホストへ 2 GiB 以上残す |
+| メモリ | ゲスト 8 GiB を推奨。既定値は host に最低 2 GiB を残す |
 
-既定メモリはホスト RAM の半分を 8～16 GiB の範囲に収めた値です。既定
-vCPU 数はホスト CPU 数の半分を 2～8 の範囲に収めた値です。そのため、
-16 GiB ホストには 8 GiB、32 GiB ホストには 16 GiB の VM が割り当てられます。
+既定 memory は host RAM の 75% で、上限 32 GiB、かつ host に最低 2 GiB を
+残します。既定 vCPU は host logical CPU の 75% で、上限 16 です。例えば
+16 GiB/8-thread host では通常約 12 GiB・6 vCPU、64 GiB/32-thread host では
+32 GiB・16 vCPU になります。`--memory` と `--vcpus` の明示値は引き続き優先されます。
 
 ## クイックスタート
 
@@ -214,6 +226,10 @@ hlint --version
                    社内ミラーやモデル endpoint が必要な場合のみ
 --formal-methods   guest 内へ Lean、Isabelle/HOL、Haskell tool、VS Code、
                    公式 Lean/Haskell extension を追加する
+--swarm-role ROLE  guest を "manager"、"worker"、または "both" として準備する
+--swarm-network N  swarm 通信に "tailscale"（既定）または "wireguard" を使う
+--add-swarm ROLE   provisioning 済みの管理対象 VM に swarm role を追加する
+--resize-existing  powered-off の既存 VM を削除せず、永続 RAM/vCPU 割当を変更する
 --replace-existing 指定した既存 VM を正確な名前の確認後に削除し、再作成する
 --finalize-existing
                    既存 VM の検証済み最終 cleanup を再開する
@@ -256,6 +272,40 @@ VM 名には小文字英字、数字、ハイフンを使います。既定で�
 domain や disk の置換を拒否します。`--replace-existing` は削除計画を表示し、
 VM 名の手入力を要求し、共有 Ubuntu cache と手動で追加した disk を残して
 から再作成します。
+
+## 再作成せず RAM・vCPU を変更する
+
+既存 VM を通常どおり shutdown し、host 上で次を実行します。
+
+```bash
+./setup-kvm-agent.sh --resize-existing \
+  --name kvm-agent \
+  --memory 24576 \
+  --vcpus 12
+```
+
+この操作は libvirt domain の永続 RAM・vCPU 設定だけを変更します。仮想 disk、
+guest filesystem、snapshot、guest 内の data は削除しません。VM が実行中の場合、または
+managed-save image がある場合は拒否します。virt-manager/libvirt が running state を保存
+している場合は、まず VM を起動して通常の full shutdown を行ってください。古い saved
+state が以前の resource configuration を復元することを防ぎます。memory または vCPU の
+一方だけを指定することもできます。
+
+```bash
+./setup-kvm-agent.sh --resize-existing --name kvm-agent --memory 32768
+./setup-kvm-agent.sh --resize-existing --name kvm-agent --vcpus 16
+```
+
+変更後に VM を起動すると新しい割当が有効になります。Guest OS と workload が
+新しい CPU 数を認識する通常の cold boot を使うため、live hot-plug には依存しません。
+
+## 任意の cross-host manager/worker VM
+
+大多数の利用者はこの機能を無視できます。初回は
+`--swarm-role manager|worker|both`、後からは `--add-swarm` で role を追加できます。
+既定は Tailscale、raw WireGuard も選択可能です。Provisioning は device enrollment や
+peer authorization を自動化しません。Directional access と risk の説明を含む
+[cross-host manager/worker VM](docs/swarm_jp.md)を有効化前に読んでください。
 
 ## 中断した finalization を再開する
 
@@ -427,6 +477,7 @@ image または pin 済み bundle に置き換えてください。
 - [認証情報の取り扱い](docs/credentials_jp.md)
 - [エージェントツールとモデルサービス](docs/agent-tools-and-model-services_jp.md)
 - [縮小形式手法環境](docs/formal-methods_jp.md)
+- [cross-host manager/worker VM](docs/swarm_jp.md)
 - [トラブルシューティング](docs/troubleshooting_jp.md)
 - [上流の一次資料](docs/references_jp.md)
 - [免責事項](DISCLAIMER_jp.md)
@@ -438,4 +489,4 @@ image または pin 済み bundle に置き換えてください。
 作成はホストの firmware、Ubuntu mirror、libvirt、更新される第三者
 installer に依存します。問題を報告する際は、ホスト release、script option、
 `cloud-init status --long`、および `/var/log/kvm-agent-provision.log` の
-関連末尾を添えてください。
+関連末尾を添えてください。Swarm 追加時は `/var/log/kvm-agent-swarm.log` も確認します。

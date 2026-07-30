@@ -45,6 +45,20 @@ awk '
 bash -n "$TEMP_DIR/guest-provision.sh"
 
 awk '
+  /^  cat > "\$destination" <<'\''SWARM_SCRIPT'\''$/ {
+    capture = 1
+    next
+  }
+  /^SWARM_SCRIPT$/ {
+    capture = 0
+  }
+  capture
+' "$SETUP_SCRIPT" > "$TEMP_DIR/swarm-provision.sh"
+[[ -s "$TEMP_DIR/swarm-provision.sh" ]] || fail \
+  "could not extract embedded swarm provisioning script"
+bash -n "$TEMP_DIR/swarm-provision.sh"
+
+awk '
   /^install -d -o "\$guest_user" -g "\$guest_group"/ {
     capture = 1
   }
@@ -91,6 +105,7 @@ for required in \
     docs/agent-tools-and-model-services.md \
     docs/agent-tools-and-model-services_jp.md \
     docs/formal-methods.md docs/formal-methods_jp.md \
+    docs/swarm.md docs/swarm_jp.md \
     docs/troubleshooting.md docs/troubleshooting_jp.md \
     docs/references.md docs/references_jp.md; do
   [[ -s "${REPO_DIR}/${required}" ]] || fail "missing or empty: $required"
@@ -113,6 +128,15 @@ for required_text in \
     "hlint" \
     "--formal-methods" \
     "formal-methods=yes" \
+    "--swarm-role" \
+    "--add-swarm" \
+    "--resize-existing" \
+    "id_ed25519_kvm_agent_swarm" \
+    "agent-worker" \
+    "https://tailscale.com/install.sh" \
+    "wireguard-tools" \
+    "HOST_RAM_MB * 3 / 4" \
+    "HOST_CPUS * 3 / 4" \
     "OLLAMA_HOST=127.0.0.1:11434" \
     "ubuntu-desktop-minimal" \
     "graphics \"spice,listen=none\"" \
@@ -126,6 +150,33 @@ for required_text in \
     "usermod -aG libvirt --"; do
   grep -Fq -- "$required_text" "$SETUP_SCRIPT" \
     || fail "setup script is missing: $required_text"
+done
+
+for required_swarm_text in \
+    'ufw insert 1 allow in on tailscale0' \
+    'ufw insert 1 allow in on wg0' \
+    'entry="restrict ${key_line}"' \
+    'passwd --lock "$worker_user"' \
+    'authorized_keys="/etc/ssh/authorized_keys/${worker_user}"' \
+    'known_hosts_kvm_agent_swarm' \
+    'case "${1:-}" in' \
+    '--clear)' \
+    'DisableForwarding yes' \
+    'PermitTTY no' \
+    'systemctl enable --now tailscaled.service'; do
+  grep -Fq -- "$required_swarm_text" "$TEMP_DIR/swarm-provision.sh" \
+    || fail "swarm provisioning is missing: $required_swarm_text"
+done
+
+for required_resource_text in \
+    '((RAM_MB > 32768)) && RAM_MB=32768' \
+    '((VCPUS > 16)) && VCPUS=16' \
+    'setmaxmem "$VM_NAME"' \
+    'setvcpus "$VM_NAME" "$VCPUS"' \
+    'domstate "$VM_NAME"' \
+    '^Managed save:'; do
+  grep -Fq -- "$required_resource_text" "$SETUP_SCRIPT" \
+    || fail "resource-management support is missing: $required_resource_text"
 done
 
 for required_disk_safety in \

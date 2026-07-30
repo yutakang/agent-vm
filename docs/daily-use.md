@@ -19,6 +19,28 @@ The script does not enable VM autostart. Enable it in `virt-manager` only if the
 guest should consume memory and expose its network services whenever the host
 boots.
 
+## Resize an existing VM without rebuilding
+
+Shut the guest down normally, then change its persistent RAM and/or vCPU
+allocation from the host:
+
+```bash
+./setup-kvm-agent.sh --resize-existing \
+  --name kvm-agent \
+  --memory 24576 \
+  --vcpus 12
+```
+
+The command refuses a running domain or a domain with a managed-save image and
+does not remove or recreate its disk. If libvirt saved the VM's running state,
+start it and perform a normal full shutdown before resizing. Start the existing
+VM normally after the change. You may specify only `--memory` or only `--vcpus`.
+Keep enough RAM and CPU capacity for the Ubuntu host; the helper enforces at
+least 2 GiB of host RAM and never permits more vCPUs than the host reports.
+
+This deliberately uses a powered-off configuration change rather than relying
+on guest hot-plug support.
+
 ## Clean snapshots
 
 Create the most valuable snapshot after:

@@ -6,7 +6,7 @@ This project links primary upstream documentation rather than treating its own
 summary as permanent truth. Installation interfaces, supported Ubuntu releases,
 provider routes, and security behavior can change.
 
-Last reviewed: 2026-07-28.
+Last reviewed: 2026-07-30.
 
 ## Ubuntu, KVM, libvirt, and cloud-init
 
@@ -59,6 +59,23 @@ The reduced profile follows current official channels for Lean, Haskell, VS
 Code, and extensions. Isabelle2025-2 is selected explicitly and its official
 Linux archive is checksum-verified. See
 [Reduced formal-methods environment](formal-methods.md).
+
+## Optional cross-host manager/worker networking
+
+- [Tailscale installation on Linux](https://tailscale.com/docs/install/linux)
+- [Tailscale grants](https://tailscale.com/docs/features/access-control/grants)
+- [Tailscale routing features](https://tailscale.com/docs/route)
+- [Tailscale SSH](https://tailscale.com/docs/features/tailscale-ssh)
+- [WireGuard overview](https://www.wireguard.com/)
+- [WireGuard quick start](https://www.wireguard.com/quickstart/)
+- [libvirt virsh command reference](https://www.libvirt.org/manpages/virsh.html)
+- [OpenSSH server configuration](https://man.openbsd.org/sshd_config)
+
+The optional swarm profile installs an overlay client inside the guests and
+continues to use ordinary OpenSSH for command execution and file transfer. The
+physical hosts are not enrolled automatically. Persistent memory and vCPU
+changes use libvirt's configuration operations on a powered-off domain. See
+[Optional cross-host manager/worker VMs](swarm.md).
 
 ## Provider configuration
 
