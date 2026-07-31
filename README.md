@@ -105,7 +105,9 @@ From the ordinary Ubuntu host account, the script:
    official Lean and Haskell extensions;
 9. when `--swarm-role` is selected, installs either Tailscale or WireGuard
    support, a dedicated manager SSH key and/or a locked-down non-sudo worker
-   account, without enrolling the VM or authorizing peers automatically;
+   account, plus helpers for safe Tailscale naming, host-key verification,
+   fixed SSH/rsync access, and remote-job lifecycle management; Tailscale
+   authentication and manager-key authorization remain explicit human steps;
 10. before any vendor installer runs, configures a guest firewall that denies
    unsolicited inbound traffic and, by default, outbound traffic to private
    and link-local address ranges, while leaving internet access open; and

@@ -1,187 +1,407 @@
-# Optional cross-host manager/worker VMs
+# Cross-host manager/worker VMs
 
 [日本語版](swarm_jp.md)
 
-KVM-Agent can optionally prepare several disposable guests to cooperate across
-physical hosts and networks. The usual arrangement is one **manager** VM that
-runs the main coding agent and one or more **worker** VMs that execute long,
-mostly deterministic jobs such as Isabelle builds or benchmark runs.
+KVM-Agent can connect disposable guests on different physical machines so that
+one VM runs the main coding agent and another VM executes long, mostly
+deterministic jobs such as Isabelle builds or benchmark runs.
 
-This is job distribution, not memory aggregation. A process running in one VM
-cannot use RAM assigned to another VM. The useful pattern is to submit an
-independent job to a worker, continue other work on the manager, then retrieve
-logs and results.
+This guide uses generic labels throughout:
+
+- **Laptop_A**: the physical machine that hosts the manager VM;
+- **Desktop_B**: the physical machine that hosts the worker VM;
+- **manager VM**: the VM in which Claude Code, Codex, or another main agent runs;
+- **worker VM**: the disposable VM that receives files and executes jobs.
+
+The two libvirt VMs may both retain the repository's default VM name,
+`kvm-agent`, because they exist on different physical hosts. Their Tailscale
+names should be distinct.
 
 ```text
-Dell host                                Galleria host
-└─ manager VM ── Tailscale/WireGuard ──► worker VM
-                  ordinary OpenSSH
+Laptop_A host                              Desktop_B host
+└─ manager VM ── Tailscale/WireGuard ────► worker VM
+                    ordinary OpenSSH         └─ agent-worker
 ```
 
-Both physical hosts remain outside the overlay network. The manager receives
-no host credential, host filesystem mount, libvirt socket, or other path to the
-worker's physical host.
+This distributes independent jobs. It does not combine the RAM or CPUs of the
+two machines into one larger computer.
 
-## What provisioning adds
+## Recommended configuration
 
-Use the same `setup-kvm-agent.sh` script for both roles. `manager`, `worker`,
-and `both` are **roles**, not VM names. Because the guests are on different
-physical hosts, both may use the repository's default VM name, `kvm-agent`.
-Omit `--name` unless that particular VM was created with a custom name.
+For two machines that may move between networks or sit behind unrelated NATs,
+use:
 
-During initial creation:
+- Tailscale inside the two guest VMs only;
+- ordinary OpenSSH over Tailscale;
+- a dedicated manager key;
+- the locked, non-sudo `agent-worker` account on the worker;
+- the installed `kvm-agent-swarm-*` helper commands.
+
+Do not add either physical host to this worker tailnet merely for convenience.
+Do not use Tailscale SSH, an exit node, subnet routes, SSH agent forwarding, or
+host directory sharing for this workflow.
+
+## Where each command is run
+
+This distinction is essential:
+
+| Location/account | Purpose | Typical commands |
+|---|---|---|
+| Laptop_A physical host | Add the manager role to its existing VM | `./setup-kvm-agent.sh --add-swarm manager` |
+| Desktop_B physical host | Add the worker role to its existing VM | `./setup-kvm-agent.sh --add-swarm worker` |
+| Normal sudo-capable account inside manager VM | Join Tailscale, configure and use the worker | `kvm-agent-swarm-tailscale-up`, `kvm-agent-swarm-configure-worker` |
+| Normal sudo-capable account inside worker VM | Join Tailscale and authorize the manager key | `kvm-agent-swarm-tailscale-up`, `sudo kvm-agent-swarm-authorize` |
+| `agent-worker` account | Receives remote jobs automatically | Normally no interactive login |
+
+The `agent-worker` account is intentionally absent from the graphical login
+workflow. It has a locked password, no sudo rights, no TTY over SSH, and no
+ability to edit its own authorized-key file.
+
+## What provisioning now automates
+
+Selecting a swarm role installs and prepares:
+
+- Tailscale or WireGuard software;
+- the dedicated manager Ed25519 key;
+- the non-sudo `agent-worker` account and `~/jobs` directory;
+- narrow UFW rules for the selected overlay interface;
+- a safe Tailscale login helper that assigns a distinct device name;
+- commands that print the manager key and worker SSH fingerprint;
+- verified worker host-key enrollment using `StrictHostKeyChecking=yes`;
+- fixed SSH and rsync wrappers that always use `agent-worker` and the dedicated
+  manager key;
+- a reviewed job helper with `submit`, `status`, `log`, `fetch`, `cancel`, and
+  `list` operations.
+
+The script deliberately does not automate the two trust decisions that require
+human control:
+
+1. authenticating each VM into the intended Tailscale account; and
+2. authorizing the manager public key on the worker.
+
+It also does not create API credentials on the worker or give either VM access
+to a physical host.
+
+## Step-by-step Tailscale setup
+
+### Step 1: add the manager role on Laptop_A
+
+Run this on the **Laptop_A physical host**, from the repository directory:
 
 ```bash
-# Run on the intended manager's physical host. Default overlay: Tailscale.
-./setup-kvm-agent.sh --formal-methods --swarm-role manager
-
-# Run on the intended worker's physical host.
-./setup-kvm-agent.sh --formal-methods --swarm-role worker
-
-# Raw WireGuard instead, on the intended worker's physical host.
-./setup-kvm-agent.sh \
-  --formal-methods \
-  --swarm-role worker \
-  --swarm-network wireguard
-```
-
-Add a role later to an already-provisioned default-named VM created by this
-repository:
-
-```bash
-# Run on the physical host of the VM that will be the manager.
 ./setup-kvm-agent.sh --add-swarm manager
-
-# Run on the physical host of the VM that will be the worker.
-./setup-kvm-agent.sh \
-  --add-swarm worker \
-  --swarm-network tailscale
 ```
 
-Only specify `--name` (and `--user`) when the existing VM actually uses
-non-default values, for example:
+For a newly created VM, the role may instead be selected during initial setup:
 
 ```bash
-./setup-kvm-agent.sh \
-  --add-swarm worker \
-  --name proof-vm-02 \
-  --user researcher \
-  --swarm-network tailscale
+./setup-kvm-agent.sh --formal-methods --swarm-role manager
 ```
 
-`--add-swarm` uses the host-side recovery key already managed for the selected
-VM. It does not rebuild or delete the guest. The guest must be running and
-reachable through libvirt's private network. Package installation can take
-several minutes; the script allows up to 30 minutes for this guest-side step
-and prints the recent `/var/log/kvm-agent-swarm.log` automatically if it fails. A wrong `--name` makes the script
-look for a recovery key in the wrong per-VM directory; the default is
-`kvm-agent`.
+Use `--name` and `--user` only if that VM was originally created with
+non-default values.
 
-Available roles are:
+### Step 2: add the worker role on Desktop_B
 
-- `manager`: creates a dedicated Ed25519 SSH key in the normal guest user's
-  `~/.ssh/id_ed25519_kvm_agent_swarm` and installs a command that prints only
-  its public half;
-- `worker`: creates the locked-password, non-sudo `agent-worker` account and
-  its `~/jobs` directory, a root-owned manager-key store, and a reviewed helper
-  for adding keys with OpenSSH's `restrict` option;
-- `both`: installs both sets of facilities for users who need a VM to submit
-  and receive jobs.
+Run this on the **Desktop_B physical host**:
 
-The profile also installs the selected overlay client and narrow guest-firewall
-exceptions. The worker account can use system-wide tools such as the provisioned
-Isabelle installation under `/opt` and `/usr/local/bin`; it does not inherit
-user-local toolchains or credentials from the normal `agent` account.
+```bash
+./setup-kvm-agent.sh --add-swarm worker
+```
 
-It deliberately does **not**:
+Or during initial creation:
 
-- sign the VM into a Tailscale account;
-- create or transmit Tailscale auth keys;
-- invent WireGuard addresses, endpoints, or peer keys;
-- enable a Tailscale exit node, subnet router, Funnel, Serve, or Tailscale SSH;
-- authorize a manager key on a worker automatically; or
-- place API credentials in the worker account.
+```bash
+./setup-kvm-agent.sh --formal-methods --swarm-role worker
+```
 
-These decisions require information and trust choices that provisioning cannot
-safely infer.
+The existing VM is not rebuilt or deleted. For `--add-swarm`, the VM must be
+running and reachable through the repository-managed recovery SSH key.
 
-Inside either prepared VM, inspect the current state with:
+### Step 3: join the manager VM to Tailscale
+
+Log in to the normal sudo-capable account inside the **manager VM** and run:
+
+```bash
+kvm-agent-swarm-tailscale-up laptop-a-manager
+```
+
+The command runs `tailscale up` with:
+
+- a distinct MagicDNS device name;
+- subnet-route acceptance disabled; and
+- Tailscale SSH disabled.
+
+It prints a browser login URL. Open that URL in a trusted browser and sign in.
+The first sign-in creates a Tailscale account/tailnet if necessary. A separate
+Tailscale username and password is normally not required; Tailscale uses the
+selected identity provider.
+
+The Tailscale iOS app is not needed for VM-to-VM operation. Installing or
+signing in on an iPhone simply adds the phone as another tailnet device.
+
+### Step 4: join the worker VM to the same tailnet
+
+Inside the normal sudo-capable account of the **worker VM**, run:
+
+```bash
+kvm-agent-swarm-tailscale-up desktop-b-worker
+```
+
+Authenticate with the same Tailscale identity/tailnet used for the manager VM.
+Do not run this as `agent-worker`.
+
+Check both VMs with:
 
 ```bash
 kvm-agent-swarm-status
 ```
 
-Provisioning logs are written to:
+A result such as `via DERP(fra)` is functional. It means Tailscale is relaying
+the already encrypted connection because a direct peer-to-peer path was not
+established. SSH, rsync, and the job helper work identically over direct and
+DERP paths.
+
+### Step 5: obtain the worker address and SSH fingerprint
+
+Inside the **worker VM**, using the normal sudo-capable account:
+
+```bash
+kvm-agent-swarm-worker-info
+```
+
+Record these two values:
 
 ```text
-/var/log/kvm-agent-swarm.log
+Tailscale IPv4: 100.x.y.z
+SSH ED25519 host-key fingerprint: SHA256:...
 ```
 
-## Why an overlay network in addition to SSH?
+The fingerprint is read locally from the worker's SSH host public key. It lets
+the manager verify the first network connection instead of blindly using
+`StrictHostKeyChecking=accept-new`.
 
-WireGuard or Tailscale does not replace SSH. SSH still authenticates the
-manager, starts commands, and transfers files. The overlay supplies a private,
-stable network path over which SSH runs.
+### Step 6: authorize the manager key on the worker
 
-Direct SSH alone is enough when the VMs are already mutually reachable, such
-as on one trusted LAN. Across unrelated home, institute, hotel, or mobile
-networks, both VMs are commonly behind routers and libvirt NAT. Direct SSH then
-requires public addressing, dynamic DNS, router and host port forwarding, and
-usually a publicly reachable SSH port.
-
-An overlay offers:
-
-- stable private VM addresses despite changing Wi-Fi or public addresses;
-- no requirement to expose guest port 22 to the public internet;
-- encrypted peer-to-peer traffic over untrusted networks;
-- a place to express network policy such as manager-to-worker TCP 22 only;
-- simpler device revocation and movement between networks.
-
-Tailscale is usually the easiest option for two laptops on unrelated networks.
-It uses WireGuard for encrypted data transport and adds device identity,
-coordination, NAT traversal, relays when direct peer-to-peer connectivity is
-not possible, and centrally managed access policy.
-
-Raw WireGuard has a smaller external trust and software surface, but it does
-not itself provide a coordination service or general NAT-traversal solution.
-At least one peer normally needs a reachable UDP endpoint, or both peers must
-use a reachable hub such as a small VPS. With two laptops behind independent
-NATs, raw WireGuard may therefore require router, host, and libvirt forwarding
-that Tailscale avoids.
-
-Official background:
-
-- [Tailscale Linux installation](https://tailscale.com/docs/install/linux)
-- [Tailscale grants](https://tailscale.com/docs/features/access-control/grants)
-- [Tailscale routing features](https://tailscale.com/docs/route)
-- [Tailscale SSH](https://tailscale.com/docs/features/tailscale-ssh)
-- [WireGuard overview](https://www.wireguard.com/)
-- [WireGuard quick start](https://www.wireguard.com/quickstart/)
-
-## Recommended Tailscale setup
-
-Provision both VMs with `--swarm-role ...` or add the roles later. Then, inside
-each VM, run:
+Inside the **manager VM**:
 
 ```bash
-sudo tailscale up
+kvm-agent-swarm-manager-info
 ```
 
-Authenticate each VM into the intended tailnet. Do not pass `--ssh`: this
-profile deliberately uses ordinary OpenSSH because its dedicated key and the
-worker's `authorized_keys` entry can retain command-, forwarding-, and
-account-level restrictions.
+Copy the complete line beginning with `ssh-ed25519`.
 
-Do not advertise routes, configure an exit node, or add either physical host to
-this worker tailnet. Record the worker address with:
+Inside the **worker VM**, still using its normal sudo-capable account:
 
 ```bash
+printf '%s\n' 'PASTE_THE_COMPLETE_MANAGER_PUBLIC_KEY_HERE' |
+  sudo kvm-agent-swarm-authorize
+```
+
+Verify it:
+
+```bash
+sudo kvm-agent-swarm-authorize --list
+```
+
+This is the one unavoidable pairing step. The public key is not secret. Never
+copy the corresponding private key to the worker.
+
+### Step 7: configure the worker safely on the manager
+
+Back inside the **manager VM**, use the address and fingerprint recorded in
+Step 5:
+
+```bash
+kvm-agent-swarm-configure-worker \
+  desktop-b-worker \
+  SHA256:PASTE_THE_WORKER_HOST_FINGERPRINT
+```
+
+The address may be the Tailscale MagicDNS name or its `100.x.y.z` address.
+This helper:
+
+1. reads the worker's ED25519 SSH host key;
+2. compares it with the trusted fingerprint;
+3. refuses the connection if they differ;
+4. stores the verified key in the dedicated
+   `~/.ssh/known_hosts_kvm_agent_swarm` file; and
+5. writes a separate SSH configuration that always uses `agent-worker`, the
+   swarm key, no agent forwarding, and `StrictHostKeyChecking=yes`.
+
+It does not weaken the user's ordinary SSH configuration.
+
+### Step 8: test the complete connection
+
+Inside the manager VM:
+
+```bash
+kvm-agent-swarm-test
+```
+
+Expected output includes:
+
+```text
+agent-worker
+```
+
+It also reports whether `isabelle` is visible to the worker account. If
+Isabelle was provisioned system-wide, the path should normally be available to
+`agent-worker` without copying credentials or user-local toolchains.
+
+## Daily use
+
+### Run one remote command
+
+```bash
+kvm-agent-swarm-ssh 'hostname && whoami && nproc && free -h'
+```
+
+### Copy files manually
+
+Upload a directory:
+
+```bash
+kvm-agent-swarm-rsync -a ./experiment/ \
+  kvm-agent-worker:jobs/manual-test/
+```
+
+Download it again:
+
+```bash
+kvm-agent-swarm-rsync -a \
+  kvm-agent-worker:jobs/manual-test/ \
+  ./returned-manual-test/
+```
+
+The special hostname `kvm-agent-worker` exists only inside the dedicated swarm
+SSH configuration used by the wrappers.
+
+### Submit a managed job
+
+A project containing `run-experiment.sh` can be submitted with:
+
+```bash
+JOB_ID="$(kvm-agent-swarm-job submit ./experiment \
+  --timeout 7200 \
+  -- ./run-experiment.sh)"
+
+echo "$JOB_ID"
+```
+
+The helper:
+
+- creates a unique directory under `/home/agent-worker/jobs`;
+- copies the project with rsync;
+- runs it with `timeout` and `nice`;
+- detaches it from the SSH session;
+- records `run.log`, `pid`, `exit-status`, and `finished`; and
+- permits only one managed job at a time on the weak worker.
+
+Check progress:
+
+```bash
+kvm-agent-swarm-job status "$JOB_ID"
+kvm-agent-swarm-job log "$JOB_ID" 80
+```
+
+Retrieve all files:
+
+```bash
+kvm-agent-swarm-job fetch "$JOB_ID" "./remote-results/$JOB_ID"
+```
+
+Cancel it:
+
+```bash
+kvm-agent-swarm-job cancel "$JOB_ID"
+```
+
+List known jobs:
+
+```bash
+kvm-agent-swarm-job list
+```
+
+## Using Claude Code or another coding agent
+
+The main agent remains on the manager VM. The worker does not need another LLM
+agent or additional OpenAI/Anthropic credentials.
+
+A useful project instruction is:
+
+> For long Isabelle experiments, use `kvm-agent-swarm-job`. Submit only the
+> required project directory, inspect status and logs, and fetch the results.
+> Never copy credentials, browser data, or private SSH keys to the worker.
+
+Initially approve each helper invocation individually. Granting repeated
+permission to the narrow `kvm-agent-swarm-job` command is safer than allowing
+arbitrary `ssh *` commands.
+
+## Common problems
+
+### `Permission denied (publickey)` and `Authenticating ... as 'agent'`
+
+The manager must connect as `agent-worker`, not the normal `agent` account.
+Use `kvm-agent-swarm-test` or `kvm-agent-swarm-ssh`; these wrappers fix the
+username and key automatically.
+
+If access still fails, compare:
+
+```bash
+# Manager VM
+kvm-agent-swarm-manager-info
+
+# Worker VM
+sudo kvm-agent-swarm-authorize --list
+```
+
+### The `agent-worker` account is not shown by graphical “Switch User”
+
+That is expected. Verify it from the worker's normal sudo-capable account:
+
+```bash
+getent passwd agent-worker
+id agent-worker
+sudo -u agent-worker -H sh -lc 'whoami; echo "$HOME"; ls -la ~/jobs'
+```
+
+### Host-key mismatch after rebuilding the worker
+
+A rebuilt disposable worker receives a new SSH host key. Verify the new
+fingerprint locally with `kvm-agent-swarm-worker-info`, then rerun:
+
+```bash
+kvm-agent-swarm-configure-worker \
+  desktop-b-worker \
+  SHA256:THE_NEW_VERIFIED_FINGERPRINT
+```
+
+Never bypass the mismatch with `StrictHostKeyChecking=no`.
+
+### `tailscale ping` works only through DERP
+
+This is normally acceptable for Isabelle jobs. `UDP: true` does not guarantee
+that two layers of VM/NAT/router translation can establish a direct path. Do
+not expose host SSH or weaken host firewalls merely to remove DERP. Optimize it
+only if file-transfer speed is actually inadequate.
+
+### The two VMs cannot see each other
+
+Check that both were authenticated into the same tailnet:
+
+```bash
+tailscale status
 tailscale ip -4
 ```
 
-Use Tailscale tags and a deny-by-default policy. A current grants-style policy
-can express the intended direction as follows; merge it with the existing
-policy rather than replacing unrelated rules blindly:
+Also confirm that the worker was joined as `desktop-b-worker`, not accidentally
+under a different identity or tailnet.
+
+## Tailscale access policy
+
+The guest firewall permits worker SSH on `tailscale0`, but a deny-by-default
+tailnet policy is still recommended. For example:
 
 ```json
 {
@@ -199,219 +419,87 @@ policy rather than replacing unrelated rules blindly:
 }
 ```
 
-Assign the manager and worker tags to the corresponding VMs. Do not add a
-reverse worker-to-manager grant. Tailscale policy is important even though the
-VM firewalls also default to denying unsolicited inbound traffic.
+Merge this with the existing policy; do not replace unrelated rules blindly.
+Do not add a reverse worker-to-manager grant.
 
-The provisioned firewall permits only tailnet-assigned IPv4 destinations
-through `tailscale0`; it does not open general private-range routing. That
-supports ordinary node-to-node SSH and MagicDNS while intentionally not
-supporting subnet routes or exit nodes.
+## Raw WireGuard alternative
 
-## Raw WireGuard setup
-
-Selecting `--swarm-network wireguard` installs `wireguard-tools` and prepares
-UFW rules for an interface named `wg0`. It does not create `wg0.conf`, because
-provisioning does not know the peer addresses, public endpoints, or whether a
-VPS hub is required.
-
-Use the official WireGuard quick start to generate a distinct key pair inside
-each guest and create `/etc/wireguard/wg0.conf`. Prefer one `/32` overlay route
-per peer rather than a broad private network, for example manager
-`10.203.0.1/32` and worker `10.203.0.2/32`. Do not route either physical LAN,
-libvirt network, or `0.0.0.0/0` through the worker tunnel.
-
-After reviewing the files:
+Select raw WireGuard with:
 
 ```bash
-sudo systemctl enable --now wg-quick@wg0
-sudo wg show
+./setup-kvm-agent.sh \
+  --add-swarm worker \
+  --swarm-network wireguard
 ```
 
-The worker firewall permits inbound SSH only on `wg0`; the manager does not
-receive an equivalent inbound exception. WireGuard cryptographically
-identifies peers, but the OpenSSH key still controls access to the worker
-account.
+The script installs `wireguard-tools` and prepares interface-scoped UFW rules,
+but it cannot safely invent peer addresses, reachable endpoints, keys, or a VPS
+hub. Create `/etc/wireguard/wg0.conf` manually in each guest.
 
-## Authorize the manager on the worker
+Prefer narrow peer routes such as:
 
-On the manager VM:
-
-```bash
-kvm-agent-swarm-public-key
+```text
+manager: 10.203.0.1/32
+worker:  10.203.0.2/32
 ```
 
-Copy the single public-key line. It is not secret. On the worker VM, using the
-normal `agent` account and its guest-local sudo authority:
+Do not route a physical LAN, the libvirt network, or `0.0.0.0/0` through the
+worker. Raw WireGuard is appropriate when one peer has a stable reachable UDP
+endpoint or when you operate a trusted hub. Tailscale is usually simpler for
+two roaming machines behind unrelated NATs.
 
-```bash
-printf '%s\n' 'ssh-ed25519 AAAA... kvm-agent-swarm-manager@manager' |
-  sudo kvm-agent-swarm-authorize
-```
+## Security boundary
 
-The helper accepts one Ed25519 public key, validates it with `ssh-keygen`, and
-adds it to the root-owned `/etc/ssh/authorized_keys/agent-worker` file with
-OpenSSH's `restrict` option. The worker cannot modify that authorization file.
-A per-user SSH policy also disables password and keyboard-interactive login,
-all SSH forwarding, tunnels, TTY allocation, and user RC files. The resulting
-remote account has no sudo. The manager key is separate from every host recovery
-key.
+The worker VM is disposable, but the physical Desktop_B host should remain
+trusted. Preserve that boundary:
 
-Review or revoke worker authorizations from the normal guest account:
+- install the overlay only inside the guests;
+- keep both physical hosts outside the worker tailnet;
+- do not place a host private key inside either VM;
+- do not expose host folders, libvirt sockets, Docker sockets, block devices,
+  or USB/PCI devices to the worker;
+- do not use `ssh -A`;
+- keep API tokens and browser sessions out of `agent-worker`;
+- treat retrieved files and logs as untrusted input; and
+- keep QEMU, KVM, libvirt, and the host kernel updated.
+
+The worker having the **public** key of its physical host in an
+`authorized_keys` file is not dangerous. That allows the host to authenticate
+to the guest. The dangerous arrangement would be a host-access **private** key
+inside the guest.
+
+A compromised manager can control the non-sudo worker account and consume its
+resources. A compromised worker can return false or malicious results. Neither
+should have a credential path to a physical host.
+
+## Removing or replacing a worker
+
+Before discarding a worker VM:
+
+1. remove or expire the device in the Tailscale admin console;
+2. discard the worker VM normally;
+3. verify the replacement worker's new SSH fingerprint; and
+4. rerun `kvm-agent-swarm-configure-worker` on the manager.
+
+Review or clear manager authorizations on a retained worker with:
 
 ```bash
 sudo kvm-agent-swarm-authorize --list
 sudo kvm-agent-swarm-authorize --clear
 ```
 
-From the manager, test ordinary OpenSSH over the selected overlay. Provisioning
-creates a dedicated known-hosts file so disposable-worker replacement does not
-weaken checking for unrelated SSH destinations:
+Provisioning state and diagnostic output are available through:
 
 ```bash
-WORKER_ADDRESS=100.x.y.z  # Tailscale address or WireGuard address
-ssh \
-  -o BatchMode=yes \
-  -o ConnectTimeout=10 \
-  -o IdentitiesOnly=yes \
-  -o IdentityAgent=none \
-  -o ForwardAgent=no \
-  -o StrictHostKeyChecking=accept-new \
-  -o UserKnownHostsFile="$HOME/.ssh/known_hosts_kvm_agent_swarm" \
-  -i ~/.ssh/id_ed25519_kvm_agent_swarm \
-  agent-worker@"$WORKER_ADDRESS" \
-  'hostname && id && mkdir -p ~/jobs'
+kvm-agent-swarm-status
+sudo tail -n 200 /var/log/kvm-agent-swarm.log
 ```
 
-If a disposable worker is rebuilt, OpenSSH should report a host-key mismatch.
-Verify that the old VM really was replaced, then remove only that worker's old
-entry with:
+## Official background
 
-```bash
-ssh-keygen -R "$WORKER_ADDRESS" \
-  -f "$HOME/.ssh/known_hosts_kvm_agent_swarm"
-```
-
-Never work around a mismatch with `StrictHostKeyChecking=no`.
-
-Do not use `ssh -A`. Do not copy the manager's private key to the worker.
-
-## Simple job workflow
-
-The manager can submit an experiment without running a second LLM agent on the
-worker:
-
-```bash
-JOB="job-$(date +%Y%m%d-%H%M%S)"
-SSH=(
-  ssh
-  -o BatchMode=yes
-  -o ConnectTimeout=10
-  -o IdentitiesOnly=yes
-  -o IdentityAgent=none
-  -o ForwardAgent=no
-  -o StrictHostKeyChecking=accept-new
-  -o "UserKnownHostsFile=$HOME/.ssh/known_hosts_kvm_agent_swarm"
-  -i "$HOME/.ssh/id_ed25519_kvm_agent_swarm"
-)
-RSYNC_SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o IdentityAgent=none -o ForwardAgent=no -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts_kvm_agent_swarm -i $HOME/.ssh/id_ed25519_kvm_agent_swarm"
-
-"${SSH[@]}" agent-worker@"$WORKER_ADDRESS" "mkdir -p ~/jobs/$JOB"
-rsync -a -e "$RSYNC_SSH" ./experiment/ \
-  "agent-worker@$WORKER_ADDRESS:jobs/$JOB/"
-
-"${SSH[@]}" agent-worker@"$WORKER_ADDRESS" "
-  cd ~/jobs/$JOB &&
-  nohup bash -c '
-    timeout 7200 nice -n 10 ./run-experiment.sh
-    printf \"%s\\n\" \$? > exit-status
-    touch finished
-  ' > run.log 2>&1 < /dev/null &
-"
-```
-
-Check and retrieve it later:
-
-```bash
-"${SSH[@]}" agent-worker@"$WORKER_ADDRESS" \
-  "cd ~/jobs/$JOB && { test -f finished && cat exit-status || tail -n 40 run.log; }"
-
-mkdir -p "./remote-results/$JOB"
-rsync -a -e "$RSYNC_SSH" \
-  "agent-worker@$WORKER_ADDRESS:jobs/$JOB/" \
-  "./remote-results/$JOB/"
-```
-
-For repeated use, wrap these operations in a small reviewed command with
-`submit`, `status`, `log`, `fetch`, and `cancel` subcommands. Limit concurrent
-jobs with `flock`, and use `timeout`, `nice`, and disk quotas or periodic cleanup
-on weak worker laptops.
-
-## Security effect and risk elevation
-
-The overlay encrypts traffic and hides SSH from the public internet, but it
-also creates a new authenticated route between previously isolated guests.
-That is a real, though controllable, increase in lateral-movement risk.
-
-### Risk to the worker
-
-A compromised manager can use its authorized key to control the non-sudo
-`agent-worker` account, alter jobs, consume CPU/RAM/disk, read submitted source,
-and use whatever outbound internet access the worker account can reach. Treat
-the worker as part of the manager's security domain and keep it disposable.
-Do not store browser sessions, API tokens, host credentials, or unrelated work
-there.
-
-### Risk to the manager
-
-The recommended network policy permits no worker-initiated connection to the
-manager. That substantially reduces exposure, but it does not make worker
-results trustworthy. A compromised worker can return false logs, malicious
-archives, huge files, shell scripts, Isabelle theories containing unexpected
-code, or project content intended to influence the manager agent.
-
-Treat retrieved files as untrusted input. Prefer plain logs, hashes, CSV, and
-small patches. Inspect results before executing them or opening an entire
-returned directory as an IDE workspace.
-
-### Risk to the physical hosts
-
-Install the overlay only inside the guests. Do not join the physical hosts to
-the same tailnet merely for convenience, and do not place host SSH private keys
-inside either guest. Keep host folders, libvirt sockets, Docker sockets, block
-devices, and USB/PCI passthrough out of the worker VM. Under those conditions,
-the residual host risk is primarily the ordinary KVM/QEMU escape risk already
-accepted when running untrusted agent code in a VM.
-
-### Tailscale-specific trust
-
-Tailscale adds a coordination control plane and receives device/connectivity
-metadata needed to operate the tailnet. Traffic payloads remain end-to-end
-encrypted. Device tags, grants, account security, and removal of retired VMs
-become part of the security boundary. Remove or expire a disposable worker in
-the Tailscale admin console when it is discarded.
-
-### WireGuard-specific trust
-
-Raw WireGuard avoids a hosted coordination service, but key distribution,
-endpoint availability, firewall rules, route scope, revocation, and NAT
-traversal become the operator's responsibility. A broad `AllowedIPs` or route
-can expose more networks than intended. Use narrow `/32` peers and a separate
-key pair for every VM.
-
-## Recommended baseline
-
-For two ordinary laptops on different networks:
-
-1. use Tailscale inside the VMs;
-2. tag one VM as manager and the other as worker;
-3. grant only manager-to-worker TCP 22;
-4. use ordinary OpenSSH and the dedicated swarm key;
-5. authorize only the non-sudo `agent-worker` account;
-6. keep hosts, subnet routes, exit nodes, Tailscale SSH, and valuable
-   credentials outside this arrangement; and
-7. treat every worker result as untrusted until reviewed.
-
-That configuration is easier to operate safely than raw WireGuard for roaming
-laptops, while retaining the VM isolation boundary and avoiding a second agent
-or additional LLM credentials on the worker.
+- [Tailscale Linux installation](https://tailscale.com/docs/install/linux)
+- [Tailscale CLI: `tailscale up`](https://tailscale.com/docs/reference/tailscale-cli/up)
+- [Tailscale access-control grants](https://tailscale.com/docs/features/access-control/grants)
+- [Tailscale connection types](https://tailscale.com/docs/reference/connection-types)
+- [WireGuard overview](https://www.wireguard.com/)
+- [WireGuard quick start](https://www.wireguard.com/quickstart/)

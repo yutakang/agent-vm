@@ -103,8 +103,9 @@ system libvirt/KVM 境界を操作する GUI クライアントです。ホス�
    GHC/Cabal/HLS を GHCup から、HLint を Cabal から導入し、さらに VS Code と
    公式 Lean/Haskell extension を導入する。
 9. `--swarm-role` を選んだ場合、Tailscale または WireGuard support、manager
-   専用 SSH key、または password lock 済み non-sudo worker account を追加する。
-   VM の enrollment と peer authorization は自動化しない。
+   専用 SSH key、password lock 済み non-sudo worker account に加え、安全な Tailscale
+   naming、host-key 検証、固定 SSH/rsync access、remote-job lifecycle 用 helper を追加する。
+   Tailscale authentication と manager-key authorization は人間が明示的に行う。
 10. ベンダー installer を実行する前に、未要求の inbound 通信と、既定では
    private・link-local address range への outbound 通信を拒否する guest firewall を
    構成する（インターネット接続は開いたまま）。

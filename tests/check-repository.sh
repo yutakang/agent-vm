@@ -18,6 +18,8 @@ bash -n "$SETUP_SCRIPT"
 bash -n "$REMOVE_SCRIPT"
 "$REMOVE_SCRIPT" --help >/dev/null
 [[ -x "$REMOVE_SCRIPT" ]] || fail "remove-kvm-agent.sh is not executable"
+[[ -x "${SCRIPT_DIR}/mock-swarm-job.sh" ]] || fail \
+  "mock-swarm-job.sh is not executable"
 if ((EUID == 0)); then
   root_output="$("$SETUP_SCRIPT" --name root-guard-test 2>&1 || true)"
   grep -Fq "not as root" <<< "$root_output" || fail \
@@ -57,6 +59,48 @@ awk '
 [[ -s "$TEMP_DIR/swarm-provision.sh" ]] || fail \
   "could not extract embedded swarm provisioning script"
 bash -n "$TEMP_DIR/swarm-provision.sh"
+
+for helper_marker in \
+    PUBLIC_KEY_SCRIPT MANAGER_INFO MANAGER_CONFIGURE MANAGER_SSH MANAGER_RSYNC \
+    MANAGER_TEST JOB_HELPER AUTHORIZE_SCRIPT WORKER_INFO TAILSCALE_UP STATUS_SCRIPT; do
+  awk -v marker="$helper_marker" '
+    {
+      line = $0
+      gsub(/\047/, "", line)
+    }
+    index(line, "<<" marker) {
+      capture = 1
+      next
+    }
+    capture && $0 == marker {
+      exit
+    }
+    capture
+  ' "$TEMP_DIR/swarm-provision.sh" > "$TEMP_DIR/${helper_marker}.sh"
+  [[ -s "$TEMP_DIR/${helper_marker}.sh" ]] || fail \
+    "could not extract embedded swarm helper: $helper_marker"
+  bash -n "$TEMP_DIR/${helper_marker}.sh" || fail \
+    "embedded swarm helper has invalid shell syntax: $helper_marker"
+
+  case "$helper_marker" in
+    PUBLIC_KEY_SCRIPT|MANAGER_INFO|MANAGER_CONFIGURE|MANAGER_SSH|MANAGER_RSYNC)
+      rendered="$TEMP_DIR/${helper_marker}.rendered.sh"
+      renderer="$TEMP_DIR/${helper_marker}.renderer.sh"
+      {
+        printf 'manager_key=%q\n' "$TEMP_DIR/id_ed25519_kvm_agent_swarm"
+        printf 'manager_known_hosts=%q\n' "$TEMP_DIR/known_hosts_kvm_agent_swarm"
+        printf 'guest_home=%q\n' "$TEMP_DIR/guest-home"
+        printf 'guest_user=%q\n' 'agent'
+        printf 'cat > %q <<%s\n' "$rendered" "$helper_marker"
+        cat "$TEMP_DIR/${helper_marker}.sh"
+        printf '%s\n' "$helper_marker"
+      } > "$renderer"
+      bash "$renderer"
+      bash -n "$rendered" || fail \
+        "rendered swarm helper has invalid shell syntax: $helper_marker"
+      ;;
+  esac
+done
 
 awk '
   /^install -d -o "\$guest_user" -g "\$guest_group"/ {
@@ -165,7 +209,13 @@ for required_swarm_text in \
     'DisableForwarding yes' \
     'PermitTTY no' \
     'systemctl enable --now tailscaled.service' \
-    'DPkg::Lock::Timeout=600'; do
+    'DPkg::Lock::Timeout=600' \
+    'kvm-agent-swarm-tailscale-up' \
+    'kvm-agent-swarm-configure-worker' \
+    'StrictHostKeyChecking yes' \
+    'User agent-worker' \
+    'kvm-agent-swarm-job submit' \
+    'SSH ED25519 host-key fingerprint:'; do
   grep -Fq -- "$required_swarm_text" "$TEMP_DIR/swarm-provision.sh" \
     || fail "swarm provisioning is missing: $required_swarm_text"
 done
@@ -181,10 +231,27 @@ grep -Fq -- 'sudo tail -n 200 /var/log/kvm-agent-swarm.log' "$SETUP_SCRIPT" \
 for swarm_doc in "${REPO_DIR}/docs/swarm.md" "${REPO_DIR}/docs/swarm_jp.md"; do
   grep -Fq -- '`kvm-agent`' "$swarm_doc" \
     || fail "swarm guide does not explain the default VM name: $swarm_doc"
+  grep -Fq -- 'Laptop_A' "$swarm_doc" \
+    || fail "swarm guide omits the generic manager-host name: $swarm_doc"
+  grep -Fq -- 'Desktop_B' "$swarm_doc" \
+    || fail "swarm guide omits the generic worker-host name: $swarm_doc"
+  for helper in \
+      kvm-agent-swarm-tailscale-up \
+      kvm-agent-swarm-worker-info \
+      kvm-agent-swarm-manager-info \
+      kvm-agent-swarm-configure-worker \
+      kvm-agent-swarm-test \
+      kvm-agent-swarm-job; do
+    grep -Fq -- "$helper" "$swarm_doc" \
+      || fail "swarm guide omits helper '$helper': $swarm_doc"
+  done
   if grep -Eq -- '--name[[:space:]]+(agent-manager|agent-worker)' "$swarm_doc"; then
     fail "swarm guide uses a role as a VM name: $swarm_doc"
   fi
 done
+if rg -n -i --glob '*.md' --glob '*.sh' --glob '!check-repository.sh' '(dell|galleria)' "$REPO_DIR" >/dev/null; then
+  fail "repository exposes private physical-machine names"
+fi
 grep -Fq -- 'The role does not change the VM name.' "$SETUP_SCRIPT" \
   || fail "setup help does not distinguish swarm role from VM name"
 grep -Fq -- "Check --name: the default VM name is 'kvm-agent'" "$SETUP_SCRIPT" \
@@ -310,6 +377,7 @@ PY
 
 "${SCRIPT_DIR}/mock-setup.sh"
 "${SCRIPT_DIR}/mock-disk-growth.sh"
+"${SCRIPT_DIR}/mock-swarm-job.sh"
 "${SCRIPT_DIR}/mock-remove.sh"
 
 echo "Repository checks passed."

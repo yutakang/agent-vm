@@ -717,13 +717,323 @@ if [[ "$role" == manager || "$role" == both ]]; then
   chown "$guest_user:$guest_group" "$manager_known_hosts"
   chmod 0600 "$manager_known_hosts"
 
-  cat > /usr/local/bin/kvm-agent-swarm-public-key <<EOF
+  cat > /usr/local/bin/kvm-agent-swarm-public-key <<PUBLIC_KEY_SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 cat '$manager_key.pub'
-EOF
+PUBLIC_KEY_SCRIPT
   chown root:root /usr/local/bin/kvm-agent-swarm-public-key
   chmod 0755 /usr/local/bin/kvm-agent-swarm-public-key
+
+  cat > /usr/local/bin/kvm-agent-swarm-manager-info <<MANAGER_INFO
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'Manager account: %s\n' '$guest_user'
+printf 'Manager public-key fingerprint: '
+ssh-keygen -lf '$manager_key.pub' -E sha256 | awk '{print \$2}'
+printf 'Manager public key (copy this entire line to the worker):\n'
+cat '$manager_key.pub'
+MANAGER_INFO
+  chown root:root /usr/local/bin/kvm-agent-swarm-manager-info
+  chmod 0755 /usr/local/bin/kvm-agent-swarm-manager-info
+
+  cat > /usr/local/bin/kvm-agent-swarm-configure-worker <<MANAGER_CONFIGURE
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  kvm-agent-swarm-configure-worker WORKER_ADDRESS SHA256:FINGERPRINT
+
+Read the expected ED25519 host-key fingerprint from
+kvm-agent-swarm-worker-info on the worker VM. This command verifies the key
+before storing it and creates a dedicated SSH configuration for the worker.
+USAGE
+  exit 2
+}
+
+[[ \$# -eq 2 ]] || usage
+worker_address="\$1"
+expected_fingerprint="\$2"
+[[ "\$worker_address" =~ ^[A-Za-z0-9._:-]+\$ ]] || {
+  echo 'Worker address contains unsupported characters.' >&2
+  exit 2
+}
+[[ "\$expected_fingerprint" == SHA256:* ]] || {
+  echo 'Expected fingerprint must begin with SHA256:.' >&2
+  exit 2
+}
+
+manager_key='$manager_key'
+known_hosts='$manager_known_hosts'
+ssh_config='$guest_home/.ssh/config_kvm_agent_swarm'
+[[ -r "\$manager_key" ]] || {
+  echo "Manager private key is missing: \$manager_key" >&2
+  exit 1
+}
+
+scan_file="\$(mktemp)"
+key_file="\$(mktemp)"
+trap 'rm -f -- "\$scan_file" "\$key_file"' EXIT
+ssh-keyscan -T 10 -t ed25519 -- "\$worker_address" >"\$scan_file" 2>/dev/null || {
+  echo "Could not read the worker ED25519 host key from \$worker_address:22." >&2
+  exit 1
+}
+grep -v '^[#[:space:]]*\$' "\$scan_file" >"\$key_file"
+[[ -s "\$key_file" ]] || {
+  echo 'ssh-keyscan returned no ED25519 host key.' >&2
+  exit 1
+}
+actual_fingerprints="\$(ssh-keygen -lf "\$key_file" -E sha256 | awk '{print \$2}' | sort -u)"
+[[ "\$actual_fingerprints" == "\$expected_fingerprint" ]] || {
+  echo 'Worker host-key verification failed.' >&2
+  echo "Expected: \$expected_fingerprint" >&2
+  echo "Received: \$actual_fingerprints" >&2
+  exit 1
+}
+
+install -d -m 0700 '$guest_home/.ssh'
+touch "\$known_hosts"
+chmod 0600 "\$known_hosts"
+ssh-keygen -R "\$worker_address" -f "\$known_hosts" >/dev/null 2>&1 || true
+cat "\$key_file" >>"\$known_hosts"
+
+cat >"\$ssh_config" <<SSH_CONFIG
+Host kvm-agent-worker
+    HostName \$worker_address
+    User agent-worker
+    IdentityFile \$manager_key
+    IdentitiesOnly yes
+    IdentityAgent none
+    ForwardAgent no
+    ForwardX11 no
+    BatchMode yes
+    ConnectTimeout 10
+    StrictHostKeyChecking yes
+    UserKnownHostsFile \$known_hosts
+    HostKeyAlgorithms ssh-ed25519
+    RequestTTY no
+SSH_CONFIG
+chmod 0600 "\$ssh_config"
+
+printf 'Verified worker host key: %s\n' "\$actual_fingerprints"
+printf 'Stored dedicated SSH configuration: %s\n' "\$ssh_config"
+printf 'Next test: kvm-agent-swarm-test\n'
+MANAGER_CONFIGURE
+  chown root:root /usr/local/bin/kvm-agent-swarm-configure-worker
+  chmod 0755 /usr/local/bin/kvm-agent-swarm-configure-worker
+
+  cat > /usr/local/bin/kvm-agent-swarm-ssh <<MANAGER_SSH
+#!/usr/bin/env bash
+set -euo pipefail
+config='$guest_home/.ssh/config_kvm_agent_swarm'
+[[ -r "\$config" ]] || {
+  echo 'Worker is not configured. Run kvm-agent-swarm-configure-worker first.' >&2
+  exit 1
+}
+exec ssh -F "\$config" kvm-agent-worker "\$@"
+MANAGER_SSH
+  chown root:root /usr/local/bin/kvm-agent-swarm-ssh
+  chmod 0755 /usr/local/bin/kvm-agent-swarm-ssh
+
+  cat > /usr/local/bin/kvm-agent-swarm-rsync <<MANAGER_RSYNC
+#!/usr/bin/env bash
+set -euo pipefail
+config='$guest_home/.ssh/config_kvm_agent_swarm'
+[[ -r "\$config" ]] || {
+  echo 'Worker is not configured. Run kvm-agent-swarm-configure-worker first.' >&2
+  exit 1
+}
+printf -v remote_shell 'ssh -F %q' "\$config"
+exec rsync -e "\$remote_shell" "\$@"
+MANAGER_RSYNC
+  chown root:root /usr/local/bin/kvm-agent-swarm-rsync
+  chmod 0755 /usr/local/bin/kvm-agent-swarm-rsync
+
+  cat > /usr/local/bin/kvm-agent-swarm-test <<'MANAGER_TEST'
+#!/usr/bin/env bash
+set -euo pipefail
+kvm-agent-swarm-ssh 'hostname; whoami; id; printf "Isabelle: "; command -v isabelle || echo not-installed'
+MANAGER_TEST
+  chown root:root /usr/local/bin/kvm-agent-swarm-test
+  chmod 0755 /usr/local/bin/kvm-agent-swarm-test
+
+  cat > /usr/local/bin/kvm-agent-swarm-job <<'JOB_HELPER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  kvm-agent-swarm-job submit DIRECTORY [--timeout SECONDS] -- COMMAND [ARG ...]
+  kvm-agent-swarm-job status JOB_ID
+  kvm-agent-swarm-job log JOB_ID [LINES]
+  kvm-agent-swarm-job fetch JOB_ID DESTINATION
+  kvm-agent-swarm-job cancel JOB_ID
+  kvm-agent-swarm-job list
+
+The worker runs at most one submitted job at a time. Jobs execute as the
+non-sudo agent-worker account under ~/jobs/JOB_ID.
+USAGE
+  exit 2
+}
+
+valid_job_id() {
+  [[ "$1" =~ ^job-[A-Za-z0-9._-]+$ ]]
+}
+
+remote_script() {
+  kvm-agent-swarm-ssh bash -s -- "$@"
+}
+
+case "${1:-}" in
+  submit)
+    shift
+    (($# >= 3)) || usage
+    source_dir="$1"
+    shift
+    timeout_seconds=7200
+    if [[ "${1:-}" == --timeout ]]; then
+      (($# >= 3)) || usage
+      timeout_seconds="$2"
+      shift 2
+    fi
+    [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || {
+      echo 'Timeout must be a positive number of seconds.' >&2
+      exit 2
+    }
+    [[ "${1:-}" == -- ]] || usage
+    shift
+    (($# > 0)) || usage
+    [[ -d "$source_dir" ]] || {
+      echo "Source directory does not exist: $source_dir" >&2
+      exit 1
+    }
+
+    job_id="job-$(date -u +%Y%m%dT%H%M%SZ)-$(printf '%04x' "$((RANDOM & 65535))")"
+    remote_script "$job_id" <<'REMOTE_MKDIR'
+set -Eeuo pipefail
+job_id="$1"
+mkdir -m 0750 -p "$HOME/jobs/$job_id"
+REMOTE_MKDIR
+    kvm-agent-swarm-rsync -a --protect-args -- \
+      "$source_dir/" "kvm-agent-worker:jobs/$job_id/"
+
+    command_line=""
+    printf -v command_line '%q ' "$@"
+    staging_dir="$(mktemp -d)"
+    trap 'rm -rf -- "${staging_dir:-}"' EXIT
+    cat >"$staging_dir/run-command.sh" <<RUN_SCRIPT
+#!/usr/bin/env bash
+set -Eeuo pipefail
+cd "\$HOME/jobs/$job_id"
+exec timeout --foreground $timeout_seconds nice -n 10 $command_line
+RUN_SCRIPT
+    cat >"$staging_dir/job-wrapper.sh" <<WRAPPER_SCRIPT
+#!/usr/bin/env bash
+set +e
+cd "\$HOME/jobs/$job_id"
+exec 9>"\$HOME/.kvm-agent-swarm-job.lock"
+if ! flock -n 9; then
+  echo 'Another swarm job is already running on this worker.'
+  status=75
+else
+  ./run-command.sh
+  status=\$?
+fi
+printf '%s\\n' "\$status" > exit-status
+touch finished
+exit "\$status"
+WRAPPER_SCRIPT
+    chmod 0700 "$staging_dir/run-command.sh" "$staging_dir/job-wrapper.sh"
+    kvm-agent-swarm-rsync -a --protect-args -- \
+      "$staging_dir/run-command.sh" "$staging_dir/job-wrapper.sh" \
+      "kvm-agent-worker:jobs/$job_id/"
+    remote_script "$job_id" <<'REMOTE_START'
+set -Eeuo pipefail
+job_id="$1"
+cd "$HOME/jobs/$job_id"
+chmod 0700 run-command.sh job-wrapper.sh
+nohup setsid ./job-wrapper.sh >run.log 2>&1 </dev/null &
+printf '%s\n' "$!" > pid
+REMOTE_START
+    printf '%s\n' "$job_id"
+    ;;
+  status)
+    [[ $# -eq 2 ]] || usage
+    job_id="$2"
+    valid_job_id "$job_id" || usage
+    remote_script "$job_id" <<'REMOTE_STATUS'
+set -euo pipefail
+job_id="$1"
+cd "$HOME/jobs/$job_id" 2>/dev/null || { echo NOT_FOUND; exit 2; }
+if [[ -f finished ]]; then
+  printf 'FINISHED '
+  cat exit-status
+elif [[ -f pid ]] && kill -0 "$(cat pid)" 2>/dev/null; then
+  echo RUNNING
+else
+  echo UNKNOWN
+fi
+REMOTE_STATUS
+    ;;
+  log)
+    [[ $# -eq 2 || $# -eq 3 ]] || usage
+    job_id="$2"
+    lines="${3:-60}"
+    valid_job_id "$job_id" || usage
+    [[ "$lines" =~ ^[1-9][0-9]*$ ]] || usage
+    remote_script "$job_id" "$lines" <<'REMOTE_LOG'
+set -euo pipefail
+job_id="$1"
+lines="$2"
+cd "$HOME/jobs/$job_id"
+tail -n "$lines" run.log
+REMOTE_LOG
+    ;;
+  fetch)
+    [[ $# -eq 3 ]] || usage
+    job_id="$2"
+    destination="$3"
+    valid_job_id "$job_id" || usage
+    mkdir -p "$destination"
+    kvm-agent-swarm-rsync -a --protect-args -- \
+      "kvm-agent-worker:jobs/$job_id/" "$destination/"
+    ;;
+  cancel)
+    [[ $# -eq 2 ]] || usage
+    job_id="$2"
+    valid_job_id "$job_id" || usage
+    remote_script "$job_id" <<'REMOTE_CANCEL'
+set -euo pipefail
+job_id="$1"
+cd "$HOME/jobs/$job_id"
+if [[ -f pid ]] && kill -0 "$(cat pid)" 2>/dev/null; then
+  pid="$(cat pid)"
+  kill -- "-$pid" 2>/dev/null || kill "$pid"
+  printf '130\n' > exit-status
+  touch finished cancelled
+  echo CANCELLED
+else
+  echo NOT_RUNNING
+fi
+REMOTE_CANCEL
+    ;;
+  list)
+    [[ $# -eq 1 ]] || usage
+    remote_script <<'REMOTE_LIST'
+set -euo pipefail
+find "$HOME/jobs" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+REMOTE_LIST
+    ;;
+  *) usage ;;
+esac
+JOB_HELPER
+  chown root:root /usr/local/bin/kvm-agent-swarm-job
+  chmod 0755 /usr/local/bin/kvm-agent-swarm-job
 fi
 
 if [[ "$role" == worker || "$role" == both ]]; then
@@ -835,6 +1145,24 @@ echo "Manager key authorized for the non-sudo '${worker_user}' account."
 AUTHORIZE_SCRIPT
   chown root:root /usr/local/sbin/kvm-agent-swarm-authorize
   chmod 0755 /usr/local/sbin/kvm-agent-swarm-authorize
+
+  cat > /usr/local/bin/kvm-agent-swarm-worker-info <<'WORKER_INFO'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'Worker account: agent-worker\n'
+printf 'Worker host name: %s\n' "$(hostname)"
+if command -v tailscale >/dev/null 2>&1; then
+  address="$(tailscale ip -4 2>/dev/null | head -n 1 || true)"
+  printf 'Tailscale IPv4: %s\n' "${address:-not-connected}"
+fi
+printf 'SSH ED25519 host-key fingerprint: '
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256 | awk '{print $2}'
+printf 'Authorized manager keys: '
+count="$(grep -cve '^[[:space:]]*$' /etc/ssh/authorized_keys/agent-worker 2>/dev/null || true)"
+printf '%s\n' "${count:-0}"
+WORKER_INFO
+  chown root:root /usr/local/bin/kvm-agent-swarm-worker-info
+  chmod 0755 /usr/local/bin/kvm-agent-swarm-worker-info
 fi
 
 install -d -o root -g root -m 0755 /var/lib/kvm-agent
@@ -844,6 +1172,38 @@ install -d -o root -g root -m 0755 /var/lib/kvm-agent
   printf 'configured=%s\n' "$(date --utc --iso-8601=seconds)"
 } > "$marker"
 chmod 0644 "$marker"
+
+if [[ "$network" == tailscale ]]; then
+  cat > /usr/local/bin/kvm-agent-swarm-tailscale-up <<'TAILSCALE_UP'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+marker=/var/lib/kvm-agent/swarm-profile
+roles="$(sed -n 's/^roles=//p' "$marker" | head -n 1)"
+case "$roles" in
+  manager) suffix=manager ;;
+  worker) suffix=worker ;;
+  *) suffix=swarm ;;
+esac
+suggested="$(hostname)-${suffix}"
+device_name="${1:-$suggested}"
+[[ "$device_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$ ]] || {
+  echo 'Tailscale device name must contain only letters, digits, and hyphens.' >&2
+  exit 2
+}
+echo "Joining Tailscale as '$device_name'."
+echo 'The physical host is not joined; only this guest VM is enrolled.'
+sudo tailscale up \
+  --hostname="$device_name" \
+  --accept-routes=false \
+  --ssh=false
+printf '\nTailscale address:\n'
+tailscale ip -4
+printf '\nPeer status:\n'
+tailscale status
+TAILSCALE_UP
+  chown root:root /usr/local/bin/kvm-agent-swarm-tailscale-up
+  chmod 0755 /usr/local/bin/kvm-agent-swarm-tailscale-up
+fi
 
 cat > /usr/local/bin/kvm-agent-swarm-status <<'STATUS_SCRIPT'
 #!/usr/bin/env bash
@@ -857,10 +1217,13 @@ if command -v wg >/dev/null 2>&1; then
   echo
   sudo -n wg show 2>/dev/null || true
 fi
-if command -v kvm-agent-swarm-public-key >/dev/null 2>&1; then
+if command -v kvm-agent-swarm-manager-info >/dev/null 2>&1; then
   echo
-  echo 'Manager public key:'
-  kvm-agent-swarm-public-key
+  kvm-agent-swarm-manager-info
+fi
+if command -v kvm-agent-swarm-worker-info >/dev/null 2>&1; then
+  echo
+  kvm-agent-swarm-worker-info
 fi
 STATUS_SCRIPT
 chown root:root /usr/local/bin/kvm-agent-swarm-status
@@ -1070,6 +1433,22 @@ if [[ "$OPERATION" == "add-swarm" ]]; then
   add_swarm_to_managed_guest
   log "KVM-Agent swarm setup completed"
   printf 'Guest address: %s\n' "$GUEST_IP"
+  printf '\nNext steps inside the normal sudo-capable guest account:\n'
+  if [[ "$SWARM_NETWORK" == "tailscale" ]]; then
+    printf '  kvm-agent-swarm-tailscale-up [DISTINCT-DEVICE-NAME]\n'
+  else
+    printf '  create and review /etc/wireguard/wg0.conf\n'
+  fi
+  if [[ "$SWARM_ROLE" == "manager" || "$SWARM_ROLE" == "both" ]]; then
+    printf '  kvm-agent-swarm-manager-info\n'
+    printf '  kvm-agent-swarm-configure-worker WORKER_ADDRESS SHA256:FINGERPRINT\n'
+    printf '  kvm-agent-swarm-test\n'
+  fi
+  if [[ "$SWARM_ROLE" == "worker" || "$SWARM_ROLE" == "both" ]]; then
+    printf '  kvm-agent-swarm-worker-info\n'
+    printf '  sudo kvm-agent-swarm-authorize\n'
+  fi
+  printf 'See docs/swarm.md for the ordered pairing procedure.\n'
   exit 0
 fi
 
@@ -2074,16 +2453,17 @@ print_next_steps() {
     printf '  kvm-agent-swarm-status\n'
     if [[ "$SWARM_NETWORK" == "tailscale" ]]; then
       printf 'Join the guest to the intended tailnet manually with:\n'
-      printf '  sudo tailscale up\n'
+      printf '  kvm-agent-swarm-tailscale-up [DEVICE-NAME]\n'
     else
       printf 'Create and review /etc/wireguard/wg0.conf before enabling wg-quick@wg0.\n'
     fi
     if [[ "$SWARM_ROLE" == "manager" || "$SWARM_ROLE" == "both" ]]; then
       printf 'Display the dedicated manager public key with:\n'
-      printf '  kvm-agent-swarm-public-key\n'
+      printf '  kvm-agent-swarm-manager-info\n'
     fi
     if [[ "$SWARM_ROLE" == "worker" || "$SWARM_ROLE" == "both" ]]; then
       printf 'Authorize one manager key from standard input with:\n'
+      printf '  kvm-agent-swarm-worker-info\n'
       printf '  sudo kvm-agent-swarm-authorize\n'
     fi
     printf 'Complete the least-privilege network policy in docs/swarm.md.\n'

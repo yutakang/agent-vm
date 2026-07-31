@@ -1,179 +1,391 @@
-# 任意の cross-host manager/worker VM 構成
+# 物理ホストをまたぐ manager/worker VM
 
 [English](swarm.md)
 
-KVM-Agent は、異なる物理 host・異なる network 上の複数の disposable guest を
-任意で連携させられます。通常は、主 agent を動かす 1 台の **manager** VM と、
-Isabelle build や benchmark など長時間の比較的決定的な job を実行する 1 台以上の
-**worker** VM を使います。
+KVM-Agent では、異なる物理マシン上の disposable guest を接続し、一方の VM で
+主 coding agent を動かし、もう一方の VM で Isabelle build や benchmark などの
+長時間・比較的決定的な job を実行できます。
 
-これは job の分散であり、memory の合算ではありません。ある VM 上の 1 process が
-別 VM に割り当てられた RAM を使うことはできません。独立した job を worker に送り、
-manager は別作業を続け、後から log と結果を回収する使い方です。
+この文書では、実機名を公開しないため、次の一般名を使います。
+
+- **Laptop_A**: manager VM を置く物理マシン
+- **Desktop_B**: worker VM を置く物理マシン
+- **manager VM**: Claude Code、Codex など主 agent を動かす VM
+- **worker VM**: file を受け取り job を実行する disposable VM
+
+2 台は別の物理 host 上にあるため、libvirt VM 名は両方とも repository 既定の
+`kvm-agent` のままで構いません。ただし Tailscale 上の device 名は別にします。
 
 ```text
-Dell host                                Galleria host
-└─ manager VM ── Tailscale/WireGuard ──► worker VM
-                  通常の OpenSSH
+Laptop_A host                              Desktop_B host
+└─ manager VM ── Tailscale/WireGuard ────► worker VM
+                    通常の OpenSSH            └─ agent-worker
 ```
 
-両方の物理 host は overlay network に参加させません。Manager には worker 側の
-物理 host credential、host directory mount、libvirt socket などを渡しません。
+これは独立 job の分散です。2 台の RAM や CPU を 1 台の大きな computer のように
+結合するものではありません。
 
-## Provisioning が追加するもの
+## 推奨構成
 
-両 role とも同じ `setup-kvm-agent.sh` を使います。`manager`、`worker`、
-`both` は **role** であり、VM 名ではありません。Guest は異なる物理 host 上に
-あるため、両方とも repository の既定 VM 名 `kvm-agent` を使えます。その VM を
-custom name で作成した場合だけ `--name` を指定してください。
+異なる network 間を移動したり、別々の NAT の背後に置かれたりする 2 台には、次を
+推奨します。
 
-初回作成時:
+- Tailscale は 2 台の guest VM 内だけに導入する。
+- Tailscale 上で通常の OpenSSH を使う。
+- manager 専用 key を使う。
+- worker 側では password lock 済み・non-sudo の `agent-worker` を使う。
+- 導入済みの `kvm-agent-swarm-*` helper command を使う。
+
+便利だからという理由だけで物理 host をこの worker tailnet に追加しないでください。
+Tailscale SSH、exit node、subnet route、SSH agent forwarding、host directory share は
+この workflow では使いません。
+
+## どこで、どの account から実行するか
+
+ここを区別することが重要です。
+
+| 場所/account | 目的 | 主な command |
+|---|---|---|
+| Laptop_A の物理 host | 既存 VM に manager role を追加 | `./setup-kvm-agent.sh --add-swarm manager` |
+| Desktop_B の物理 host | 既存 VM に worker role を追加 | `./setup-kvm-agent.sh --add-swarm worker` |
+| manager VM 内の通常の sudo 可能 account | Tailscale 参加、worker 設定・利用 | `kvm-agent-swarm-tailscale-up`, `kvm-agent-swarm-configure-worker` |
+| worker VM 内の通常の sudo 可能 account | Tailscale 参加、manager key 認可 | `kvm-agent-swarm-tailscale-up`, `sudo kvm-agent-swarm-authorize` |
+| `agent-worker` account | remote job を自動受信 | 通常は対話 login しない |
+
+`agent-worker` は graphical login 用 account ではありません。Password は lock され、
+sudo 権限はなく、SSH TTY は禁止され、自分の authorized-key file を変更できません。
+
+## Provisioning が自動化するもの
+
+Swarm role を選ぶと、setup script は次を導入・準備します。
+
+- Tailscale または WireGuard software
+- manager 専用 Ed25519 key
+- non-sudo `agent-worker` account と `~/jobs`
+- 選択した overlay interface 向けの限定 UFW rule
+- 重複しない device 名を設定する安全な Tailscale login helper
+- manager key と worker SSH fingerprint を表示する command
+- `StrictHostKeyChecking=yes` を使う worker host-key 検証
+- 常に `agent-worker` と専用 key を使う SSH/rsync wrapper
+- `submit`, `status`, `log`, `fetch`, `cancel`, `list` を持つ job helper
+
+次の 2 つは、人間が trust を判断する必要があるため、意図的に自動化しません。
+
+1. 各 VM を意図した Tailscale account に authenticate すること
+2. manager public key を worker で authorize すること
+
+Worker に API credential を作ったり、VM から物理 host への access を与えたりもしません。
+
+## Tailscale setup: 1 step ずつ
+
+### Step 1: Laptop_A で manager role を追加
+
+**Laptop_A の物理 host**で repository directory から実行します。
 
 ```bash
-# manager にする VM の物理 host で実行。既定 overlay は Tailscale。
-./setup-kvm-agent.sh --formal-methods --swarm-role manager
-
-# worker にする VM の物理 host で実行。
-./setup-kvm-agent.sh --formal-methods --swarm-role worker
-
-# raw WireGuard を使う場合は、worker にする VM の物理 host で実行。
-./setup-kvm-agent.sh \
-  --formal-methods \
-  --swarm-role worker \
-  --swarm-network wireguard
-```
-
-Repository で作成・provisioning 済みの、既定名の VM に後から追加する場合:
-
-```bash
-# manager にする VM の物理 host で実行。
 ./setup-kvm-agent.sh --add-swarm manager
-
-# worker にする VM の物理 host で実行。
-./setup-kvm-agent.sh \
-  --add-swarm worker \
-  --swarm-network tailscale
 ```
 
-既存 VM が実際に non-default の値を使っている場合だけ、`--name`（および
-`--user`）を指定します。例えば:
+新規 VM 作成時に指定する場合:
 
 ```bash
-./setup-kvm-agent.sh \
-  --add-swarm worker \
-  --name proof-vm-02 \
-  --user researcher \
-  --swarm-network tailscale
+./setup-kvm-agent.sh --formal-methods --swarm-role manager
 ```
 
-`--add-swarm` は、選択した VM 用に host が既に管理している recovery key を
-使います。Guest を再作成・削除しません。Guest は起動中で、libvirt private
-network 経由で到達可能である必要があります。package の導入には数分かかることが
-あるため、この Guest 内処理には最大 30 分を許可します。失敗時には最近の
-`/var/log/kvm-agent-swarm.log` を自動表示します。誤った `--name` を指定すると、
-script は別の per-VM directory で recovery key を探します。既定名は
-`kvm-agent` です。
+`--name` と `--user` は、その VM を初めから非既定値で作った場合だけ指定します。
 
-Role は次の 3 種類です。
+### Step 2: Desktop_B で worker role を追加
 
-- `manager`: 通常 guest user の
-  `~/.ssh/id_ed25519_kvm_agent_swarm` に専用 Ed25519 SSH key を作り、public half
-  だけを表示する command を導入します。
-- `worker`: password lock 済み・non-sudo の `agent-worker` account と `~/jobs`
-  directory、root-owned の manager-key store を作り、OpenSSH の `restrict` option
-  付きで manager public key を追加する helper を導入します。
-- `both`: 送信側・受信側の両方として使う必要がある VM 向けです。
+**Desktop_B の物理 host**で実行します。
 
-Profile は選択した overlay client と、必要最小限の guest firewall exception も
-追加します。Worker account は `/opt` と `/usr/local/bin` にある provision 済み Isabelle
-のような system-wide tool を利用できますが、通常の `agent` account の user-local
-toolchain や credential は継承しません。
+```bash
+./setup-kvm-agent.sh --add-swarm worker
+```
 
-一方で次は自動化しません。
+新規作成時に指定する場合:
 
-- VM を Tailscale account へ sign in すること
-- Tailscale auth key の作成・転送
-- WireGuard address、endpoint、peer key の自動決定
-- Tailscale exit node、subnet router、Funnel、Serve、Tailscale SSH の有効化
-- manager key の worker への自動 authorization
-- worker account への API credential 配置
+```bash
+./setup-kvm-agent.sh --formal-methods --swarm-role worker
+```
 
-これらは provisioning が安全に推測できない trust decision を含むためです。
+既存 VM は再作成・削除されません。`--add-swarm` のときは VM が起動し、repository が
+管理する recovery SSH key から到達可能である必要があります。
 
-VM 内で現在の状態を確認します。
+### Step 3: manager VM を Tailscale に参加させる
+
+**manager VM 内の通常の sudo 可能 account**で実行します。
+
+```bash
+kvm-agent-swarm-tailscale-up laptop-a-manager
+```
+
+この command は次を指定して `tailscale up` を実行します。
+
+- 重複しない MagicDNS device 名
+- subnet route を accept しない
+- Tailscale SSH を無効にする
+
+Browser login URL が表示されるので、信頼する browser で開き、sign in します。最初の
+sign-in なら Tailscale account/tailnet が作成されます。通常は Tailscale 専用の別 username
+と password を作らず、選択した identity provider で認証します。
+
+iPhone の Tailscale app は VM 間通信には不要です。iPhone でも sign in して有効にすると、
+phone が tailnet の別 device として追加されるだけです。
+
+### Step 4: worker VM を同じ tailnet に参加させる
+
+**worker VM 内の通常の sudo 可能 account**で実行します。
+
+```bash
+kvm-agent-swarm-tailscale-up desktop-b-worker
+```
+
+Manager VM と同じ Tailscale identity/tailnet で authenticate してください。
+`agent-worker` から実行しません。
+
+両 VM で状態を確認します。
 
 ```bash
 kvm-agent-swarm-status
 ```
 
-Log は次に記録されます。
+`via DERP(fra)` と表示されても接続は機能しています。Direct peer-to-peer path を作れず、
+暗号化済み traffic を relay しているという意味です。SSH、rsync、job helper の使い方は
+direct 接続でも DERP でも同じです。
+
+### Step 5: worker address と SSH fingerprint を取得
+
+**worker VM 内の通常 account**で実行します。
+
+```bash
+kvm-agent-swarm-worker-info
+```
+
+次の 2 値を記録します。
 
 ```text
-/var/log/kvm-agent-swarm.log
+Tailscale IPv4: 100.x.y.z
+SSH ED25519 host-key fingerprint: SHA256:...
 ```
 
-## SSH だけでなく overlay network を使う理由
+Fingerprint は worker の SSH host public key から local に読み取ります。最初の network
+接続で `StrictHostKeyChecking=accept-new` に盲目的に依存せず、manager が本物の worker を
+検証するために使います。
 
-WireGuard/Tailscale は SSH の代替ではありません。SSH は manager の認証、command
-実行、file transfer を担当します。Overlay は、その SSH を通す private で安定した
-network path を提供します。
+### Step 6: worker で manager key を authorize
 
-2 台の VM が既に同じ trusted LAN で相互到達可能なら、直接 SSH だけでも十分です。
-しかし異なる家庭、研究所、hotel、mobile network では、両 VM は通常 router と
-libvirt NAT の背後にいます。直接 SSH するには public address、dynamic DNS、router・
-host の port forwarding、public に到達可能な SSH port が必要になりがちです。
-
-Overlay の主な利点は次です。
-
-- Wi-Fi や public address が変わっても stable private VM address を使える
-- guest port 22 を public internet に公開しなくてよい
-- untrusted network 上の peer-to-peer traffic を暗号化できる
-- manager から worker の TCP 22 だけ、という network policy を書ける
-- device revocation と network 間移動が容易
-
-異なる network 上の 2 台の laptop では、通常 Tailscale が最も簡単です。
-WireGuard による end-to-end encrypted transport に加え、device identity、
-coordination、NAT traversal、direct 接続できない場合の relay、中央 policy 管理を
-提供します。
-
-Raw WireGuard は外部 trust と software surface が小さい一方、coordination service
-や一般的 NAT traversal は提供しません。通常は少なくとも 1 peer に到達可能な UDP
-endpoint が必要で、そうでなければ VPS などの reachable hub が必要です。両 laptop
-が独立 NAT の背後にある場合、router・host・libvirt forwarding が必要になることが
-あり、これは Tailscale が回避する部分です。
-
-一次資料:
-
-- [Tailscale Linux installation](https://tailscale.com/docs/install/linux)
-- [Tailscale grants](https://tailscale.com/docs/features/access-control/grants)
-- [Tailscale routing features](https://tailscale.com/docs/route)
-- [Tailscale SSH](https://tailscale.com/docs/features/tailscale-ssh)
-- [WireGuard overview](https://www.wireguard.com/)
-- [WireGuard quick start](https://www.wireguard.com/quickstart/)
-
-## 推奨 Tailscale setup
-
-両 VM を `--swarm-role ...` 付きで作るか、後から role を追加します。その後、各 VM
-内で次を実行します。
+**manager VM**で:
 
 ```bash
-sudo tailscale up
+kvm-agent-swarm-manager-info
 ```
 
-各 VM を intended tailnet に authenticate します。`--ssh` は付けません。この
-profile は通常の OpenSSH を意図しており、専用 key と worker の `authorized_keys`
-entry で account・forwarding 制限を維持します。
+`ssh-ed25519` で始まる 1 行全体を copy します。
 
-Route advertisement、exit node は使わず、物理 host をこの worker tailnet に追加
-しないでください。Worker address は次で確認します。
+**worker VM 内の通常 sudo account**で:
 
 ```bash
+printf '%s\n' 'MANAGER_PUBLIC_KEY_1行全体をここへ貼る' |
+  sudo kvm-agent-swarm-authorize
+```
+
+確認:
+
+```bash
+sudo kvm-agent-swarm-authorize --list
+```
+
+これが唯一不可避な pairing 操作です。Public key は secret ではありません。対応する
+private key を worker へ copy してはいけません。
+
+### Step 7: manager 側で worker を安全に登録
+
+Step 5 の address と fingerprint を使い、**manager VM**で実行します。
+
+```bash
+kvm-agent-swarm-configure-worker \
+  desktop-b-worker \
+  SHA256:WORKER_HOST_FINGERPRINT
+```
+
+Address は Tailscale MagicDNS 名でも `100.x.y.z` address でも構いません。この helper は:
+
+1. worker の ED25519 SSH host key を読む。
+2. 信頼済み fingerprint と比較する。
+3. 不一致なら接続を拒否する。
+4. 検証済み key を専用 `~/.ssh/known_hosts_kvm_agent_swarm` に保存する。
+5. `agent-worker`、専用 key、agent forwarding 無効、
+   `StrictHostKeyChecking=yes` を固定した別 SSH config を作る。
+
+通常の SSH config は弱めません。
+
+### Step 8: 全接続を test
+
+Manager VM で:
+
+```bash
+kvm-agent-swarm-test
+```
+
+出力には次が含まれるはずです。
+
+```text
+agent-worker
+```
+
+さらに worker account から `isabelle` が見えるかも表示します。Isabelle が system-wide に
+provisioning されていれば、credential や user-local toolchain を copy せずに通常利用できます。
+
+## 日常利用
+
+### Remote command を 1 つ実行
+
+```bash
+kvm-agent-swarm-ssh 'hostname && whoami && nproc && free -h'
+```
+
+### File を手動 copy
+
+Upload:
+
+```bash
+kvm-agent-swarm-rsync -a ./experiment/ \
+  kvm-agent-worker:jobs/manual-test/
+```
+
+Download:
+
+```bash
+kvm-agent-swarm-rsync -a \
+  kvm-agent-worker:jobs/manual-test/ \
+  ./returned-manual-test/
+```
+
+`kvm-agent-worker` という special hostname は、swarm wrapper が使う専用 SSH config 内だけに
+存在します。
+
+### 管理 job を submit
+
+`run-experiment.sh` を含む project なら:
+
+```bash
+JOB_ID="$(kvm-agent-swarm-job submit ./experiment \
+  --timeout 7200 \
+  -- ./run-experiment.sh)"
+
+echo "$JOB_ID"
+```
+
+Helper は:
+
+- `/home/agent-worker/jobs` に一意の directory を作る。
+- rsync で project を送る。
+- `timeout` と `nice` を使って実行する。
+- SSH session から detach する。
+- `run.log`, `pid`, `exit-status`, `finished` を記録する。
+- 弱い worker で管理 job を同時に 1 つだけ実行する。
+
+進捗:
+
+```bash
+kvm-agent-swarm-job status "$JOB_ID"
+kvm-agent-swarm-job log "$JOB_ID" 80
+```
+
+結果取得:
+
+```bash
+kvm-agent-swarm-job fetch "$JOB_ID" "./remote-results/$JOB_ID"
+```
+
+Cancel:
+
+```bash
+kvm-agent-swarm-job cancel "$JOB_ID"
+```
+
+Job 一覧:
+
+```bash
+kvm-agent-swarm-job list
+```
+
+## Claude Code などから使う
+
+Main agent は manager VM に残します。Worker に第 2 LLM agent や追加 OpenAI/Anthropic
+credential は不要です。
+
+Project instruction の例:
+
+> 長時間の Isabelle experiment には `kvm-agent-swarm-job` を使う。必要な project
+> directory だけを submit し、status/log を確認して結果を fetch する。Credential、
+> browser data、private SSH key は worker に copy しない。
+
+初めは helper invocation ごとに個別承認してください。任意の `ssh *` を恒久許可するより、
+限定された `kvm-agent-swarm-job` を許可する方が安全です。
+
+## よくある問題
+
+### `Permission denied (publickey)` と `Authenticating ... as 'agent'`
+
+Manager は通常の `agent` ではなく `agent-worker` として接続します。
+`kvm-agent-swarm-test` または `kvm-agent-swarm-ssh` を使えば username と key は固定されます。
+
+それでも失敗する場合:
+
+```bash
+# manager VM
+kvm-agent-swarm-manager-info
+
+# worker VM
+sudo kvm-agent-swarm-authorize --list
+```
+
+### Graphical “Switch User” に `agent-worker` がない
+
+正常です。Worker の通常 sudo account から確認します。
+
+```bash
+getent passwd agent-worker
+id agent-worker
+sudo -u agent-worker -H sh -lc 'whoami; echo "$HOME"; ls -la ~/jobs'
+```
+
+### Worker 再作成後の host-key mismatch
+
+Disposable worker を再作成すると SSH host key は変わります。
+`kvm-agent-swarm-worker-info` で新 fingerprint を local に確認後、manager で再実行します。
+
+```bash
+kvm-agent-swarm-configure-worker \
+  desktop-b-worker \
+  SHA256:NEW_VERIFIED_FINGERPRINT
+```
+
+`StrictHostKeyChecking=no` で回避しないでください。
+
+### `tailscale ping` が DERP 経由だけ
+
+Isabelle job には通常問題ありません。`UDP: true` でも、VM NAT・host network・router NAT の
+組合せによって direct path を作れないことがあります。DERP を消すためだけに host SSH を
+公開したり host firewall を弱めたりしないでください。File transfer が実際に遅い場合だけ
+最適化します。
+
+### 2 VM が互いに見えない
+
+両方が同じ tailnet に authenticate されたか確認します。
+
+```bash
+tailscale status
 tailscale ip -4
 ```
 
-Tag と deny-by-default policy を使います。現在の grants-style policy では、意図する
-方向を例えば次のように表現できます。既存 policy を無条件に置き換えず merge して
-ください。
+Worker が別 identity/tailnet ではなく `desktop-b-worker` として参加したかも確認します。
+
+## Tailscale access policy
+
+Guest firewall は `tailscale0` 上の worker SSH を許可しますが、tailnet でも deny-by-default
+policy を推奨します。
 
 ```json
 {
@@ -191,204 +403,83 @@ Tag と deny-by-default policy を使います。現在の grants-style policy �
 }
 ```
 
-Manager/worker VM にそれぞれ tag を付け、worker から manager への逆方向 grant は
-追加しません。Guest firewall も unsolicited inbound を deny しますが、Tailscale
-policy も重要です。
+既存 policy に merge し、無関係な rule を丸ごと置換しないでください。Worker から manager
+への逆方向 grant は追加しません。
 
-Provisioning 済み firewall は `tailscale0` 上で tailnet-assigned IPv4 destination
-だけを許可します。Node-to-node SSH と MagicDNS を意図し、subnet route や exit node
-のための一般 private routing は開きません。
+## Raw WireGuard alternative
 
-## Raw WireGuard setup
-
-`--swarm-network wireguard` は `wireguard-tools` を導入し、`wg0` interface 用 UFW rule
-を準備します。Peer address、public endpoint、VPS hub の要否を provisioning は知らない
-ため、`wg0.conf` は作りません。
-
-WireGuard の公式 quick start に従い、各 guest 内で別々の key pair を生成し、
-`/etc/wireguard/wg0.conf` を作ります。Broad private network ではなく peer ごとの `/32`
-を推奨します。例えば manager `10.203.0.1/32`、worker `10.203.0.2/32` です。物理 LAN、
-libvirt network、`0.0.0.0/0` を worker tunnel に route しないでください。
-
-File を review 後:
+Raw WireGuard を選ぶ場合:
 
 ```bash
-sudo systemctl enable --now wg-quick@wg0
-sudo wg show
+./setup-kvm-agent.sh \
+  --add-swarm worker \
+  --swarm-network wireguard
 ```
 
-Worker firewall は `wg0` 上の inbound SSH だけを許可します。Manager 側には同等の
-inbound exception を作りません。WireGuard は peer を暗号学的に識別しますが、worker
-account への access は OpenSSH key が制御します。
+Script は `wireguard-tools` と interface-scoped UFW rule を準備しますが、peer address、到達可能
+endpoint、key、VPS hub を安全に推測できません。各 guest で
+`/etc/wireguard/wg0.conf` を手動作成します。
 
-## Manager を worker に authorize する
+Broad network ではなく narrow peer route を推奨します。
 
-Manager VM で:
-
-```bash
-kvm-agent-swarm-public-key
+```text
+manager: 10.203.0.1/32
+worker:  10.203.0.2/32
 ```
 
-表示された public-key 1 行を copy します。Public key は secret ではありません。
-Worker VM で、通常の `agent` account とその guest-local sudo を使って:
+物理 LAN、libvirt network、`0.0.0.0/0` を worker tunnel に route しないでください。
+Raw WireGuard は、片方に安定した到達可能 UDP endpoint がある場合、または信頼する hub を
+運用する場合に適します。別々の NAT の背後を移動する 2 台には Tailscale の方が通常簡単です。
 
-```bash
-printf '%s\n' 'ssh-ed25519 AAAA... kvm-agent-swarm-manager@manager' |
-  sudo kvm-agent-swarm-authorize
-```
+## Security boundary
 
-Helper は Ed25519 public key 1 行だけを受け取り、`ssh-keygen` で検証し、OpenSSH の
-`restrict` option 付きで root-owned の
-`/etc/ssh/authorized_keys/agent-worker` に追加します。Worker 自身はこの authorization
-file を変更できません。User-specific SSH policy は password・keyboard-interactive login、
-全 SSH forwarding、tunnel、TTY、user RC file も無効化します。Remote account は
-non-sudo です。Manager key は host recovery key とは別物です。
+Worker VM は disposable でも、Desktop_B の物理 host は trusted として守ります。
 
-通常の guest account から authorization を確認・全 revoke できます。
+- Overlay は guest 内だけに導入する。
+- 両物理 host は worker tailnet の外に置く。
+- Host private key を VM 内に置かない。
+- Host folder、libvirt socket、Docker socket、block device、USB/PCI device を worker に渡さない。
+- `ssh -A` を使わない。
+- API token と browser session を `agent-worker` に置かない。
+- 回収した file と log は untrusted input として扱う。
+- QEMU、KVM、libvirt、host kernel を更新する。
+
+Worker VM の `authorized_keys` に物理 host の**public key**があること自体は危険ではありません。
+これは host から guest へ authenticate できるという意味です。危険なのは、host へ入れる
+**private key**を guest 内に置くことです。
+
+Compromised manager は non-sudo worker account とその resource を制御できます。
+Compromised worker は偽または malicious な結果を返せます。どちらにも物理 host への
+credential path を与えないでください。
+
+## Worker を廃棄・交換する
+
+Worker VM を捨てる前に:
+
+1. Tailscale admin console で device を remove/expire する。
+2. 通常どおり worker VM を廃棄する。
+3. replacement worker の新 SSH fingerprint を確認する。
+4. manager で `kvm-agent-swarm-configure-worker` を再実行する。
+
+保持する worker の manager authorization 確認・全削除:
 
 ```bash
 sudo kvm-agent-swarm-authorize --list
 sudo kvm-agent-swarm-authorize --clear
 ```
 
-Manager から overlay 上の通常 OpenSSH を test します。Provisioning は swarm 専用の
-known-hosts file を作るため、disposable worker の交換によって無関係な SSH destination
-の検証を弱める必要はありません。
+Provisioning state と log:
 
 ```bash
-WORKER_ADDRESS=100.x.y.z  # Tailscale または WireGuard address
-ssh \
-  -o BatchMode=yes \
-  -o ConnectTimeout=10 \
-  -o IdentitiesOnly=yes \
-  -o IdentityAgent=none \
-  -o ForwardAgent=no \
-  -o StrictHostKeyChecking=accept-new \
-  -o UserKnownHostsFile="$HOME/.ssh/known_hosts_kvm_agent_swarm" \
-  -i ~/.ssh/id_ed25519_kvm_agent_swarm \
-  agent-worker@"$WORKER_ADDRESS" \
-  'hostname && id && mkdir -p ~/jobs'
+kvm-agent-swarm-status
+sudo tail -n 200 /var/log/kvm-agent-swarm.log
 ```
 
-Disposable worker を再作成すると OpenSSH は host-key mismatch を報告するはずです。
-旧 VM が本当に交換されたことを確認してから、その worker の古い entry だけを削除します。
+## 公式資料
 
-```bash
-ssh-keygen -R "$WORKER_ADDRESS" \
-  -f "$HOME/.ssh/known_hosts_kvm_agent_swarm"
-```
-
-Mismatch を `StrictHostKeyChecking=no` で回避しないでください。
-
-`ssh -A` は使わず、manager private key を worker に copy しないでください。
-
-## 簡単な job workflow
-
-Worker に第 2 の LLM agent を動かさず、manager から experiment を送れます。
-
-```bash
-JOB="job-$(date +%Y%m%d-%H%M%S)"
-SSH=(
-  ssh
-  -o BatchMode=yes
-  -o ConnectTimeout=10
-  -o IdentitiesOnly=yes
-  -o IdentityAgent=none
-  -o ForwardAgent=no
-  -o StrictHostKeyChecking=accept-new
-  -o "UserKnownHostsFile=$HOME/.ssh/known_hosts_kvm_agent_swarm"
-  -i "$HOME/.ssh/id_ed25519_kvm_agent_swarm"
-)
-RSYNC_SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o IdentityAgent=none -o ForwardAgent=no -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts_kvm_agent_swarm -i $HOME/.ssh/id_ed25519_kvm_agent_swarm"
-
-"${SSH[@]}" agent-worker@"$WORKER_ADDRESS" "mkdir -p ~/jobs/$JOB"
-rsync -a -e "$RSYNC_SSH" ./experiment/ \
-  "agent-worker@$WORKER_ADDRESS:jobs/$JOB/"
-
-"${SSH[@]}" agent-worker@"$WORKER_ADDRESS" "
-  cd ~/jobs/$JOB &&
-  nohup bash -c '
-    timeout 7200 nice -n 10 ./run-experiment.sh
-    printf \"%s\\n\" \$? > exit-status
-    touch finished
-  ' > run.log 2>&1 < /dev/null &
-"
-```
-
-後で status と結果を取得します。
-
-```bash
-"${SSH[@]}" agent-worker@"$WORKER_ADDRESS" \
-  "cd ~/jobs/$JOB && { test -f finished && cat exit-status || tail -n 40 run.log; }"
-
-mkdir -p "./remote-results/$JOB"
-rsync -a -e "$RSYNC_SSH" \
-  "agent-worker@$WORKER_ADDRESS:jobs/$JOB/" \
-  "./remote-results/$JOB/"
-```
-
-繰り返し使うなら `submit`、`status`、`log`、`fetch`、`cancel` subcommand を持つ小さな
-review 済み wrapper を作ってください。弱い worker laptop では `flock` で同時 job
-数を制限し、`timeout`、`nice`、disk cleanup を使います。
-
-## Security effect と risk elevation
-
-Overlay は traffic を暗号化し SSH を public internet から隠しますが、以前は分離
-されていた guest 間に新しい authenticated route を作ります。これは実在する lateral
-movement risk の増加ですが、制御可能です。
-
-### Worker への risk
-
-Manager が compromise されると、その authorized key で non-sudo `agent-worker`
-account を制御し、job 改変、CPU/RAM/disk 消費、送信済み source の読取り、worker
-account から到達可能な internet 利用が可能になります。Worker は manager の security
-domain の一部として扱い、disposable にしてください。Browser session、API token、host
-credential、無関係な work を置きません。
-
-### Manager への risk
-
-推奨 network policy は worker initiated connection を manager に許可しません。
-これは exposure を大幅に減らしますが、worker result の trustworthiness は保証しません。
-Compromised worker は偽 log、malicious archive、巨大 file、shell script、予期しない code
-を含む Isabelle theory、manager agent を誘導する project content を返せます。
-
-回収物は untrusted input として扱います。Plain log、hash、CSV、小さな patch を優先し、
-実行や IDE workspace として開く前に review してください。
-
-### 物理 host への risk
-
-Overlay は guest 内だけに導入します。便利だからという理由で物理 host を同じ tailnet
-に入れず、host SSH private key を guest に置きません。Host folder、libvirt socket、
-Docker socket、block device、USB/PCI passthrough を worker VM に渡しません。この条件なら、
-残る host risk は untrusted agent code を VM で動かす際に既に受け入れている通常の
-KVM/QEMU escape risk が中心です。
-
-### Tailscale 固有の trust
-
-Tailscale は coordination control plane を追加し、tailnet operation に必要な device・
-connectivity metadata を受け取ります。Traffic payload は end-to-end encrypted のままです。
-Device tag、grant、account security、廃棄 VM の削除が security boundary の一部になります。
-Disposable worker を捨てる際は Tailscale admin console から remove/expire してください。
-
-### WireGuard 固有の trust
-
-Raw WireGuard は hosted coordination service を避けますが、key distribution、endpoint
-availability、firewall、route scope、revocation、NAT traversal は operator 責任です。
-Broad `AllowedIPs` や route は意図以上の network を expose します。VM ごとに別 key pair と
-narrow `/32` peer を使ってください。
-
-## 推奨 baseline
-
-異なる network 上の普通の laptop 2 台なら:
-
-1. Tailscale を guest 内だけで使う。
-2. 一方を manager、他方を worker として tag する。
-3. manager から worker の TCP 22 だけ grant する。
-4. 通常 OpenSSH と専用 swarm key を使う。
-5. non-sudo `agent-worker` account だけを authorize する。
-6. 物理 host、subnet route、exit node、Tailscale SSH、価値ある credential をこの構成の
-   外に置く。
-7. worker result は review まで untrusted と扱う。
-
-この構成は roaming laptop で raw WireGuard を安全に運用するより簡単で、VM isolation を
-維持しつつ、worker に第 2 agent や追加 LLM credential を置く必要もありません。
+- [Tailscale Linux installation](https://tailscale.com/docs/install/linux)
+- [Tailscale CLI: `tailscale up`](https://tailscale.com/docs/reference/tailscale-cli/up)
+- [Tailscale access-control grants](https://tailscale.com/docs/features/access-control/grants)
+- [Tailscale connection types](https://tailscale.com/docs/reference/connection-types)
+- [WireGuard overview](https://www.wireguard.com/)
+- [WireGuard quick start](https://www.wireguard.com/quickstart/)
