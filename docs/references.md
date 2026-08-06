@@ -86,6 +86,14 @@ changes use libvirt's configuration operations on a powered-off domain. See
 - [Aider with Ollama](https://aider.chat/docs/llms/ollama.html)
 - [Ollama documentation](https://docs.ollama.com/)
 
+For the optional journal reporter, Codex follows the official
+[non-interactive mode](https://developers.openai.com/codex/non-interactive-mode) and
+[AGENTS.md](https://developers.openai.com/codex/agent-configuration/agents-md)
+interfaces. Claude follows its official
+[programmatic mode](https://code.claude.com/docs/en/headless) and
+[CLI tool controls](https://code.claude.com/docs/en/cli-reference). OpenCode is
+not used as an unattended journal reporter.
+
 Provider compatibility is not inferred merely from an OpenAI-like URL. Consult
 the current documentation for the client and service, then test the exact
 agentic workflow.

@@ -20,6 +20,16 @@ bash -n "$REMOVE_SCRIPT"
 [[ -x "$REMOVE_SCRIPT" ]] || fail "remove-kvm-agent.sh is not executable"
 [[ -x "${SCRIPT_DIR}/mock-swarm-job.sh" ]] || fail \
   "mock-swarm-job.sh is not executable"
+[[ -x "${SCRIPT_DIR}/mock-journal.sh" ]] || fail \
+  "mock-journal.sh is not executable"
+[[ -x "${SCRIPT_DIR}/mock-cloud-init-clean.sh" ]] || fail \
+  "mock-cloud-init-clean.sh is not executable"
+bash -n "${REPO_DIR}/journal/install-journal.sh"
+python3 - "${REPO_DIR}/journal/kvm_agent_journal.py" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+compile(path.read_text(encoding='utf-8'), str(path), 'exec')
+PY
 if ((EUID == 0)); then
   root_output="$("$SETUP_SCRIPT" --name root-guard-test 2>&1 || true)"
   grep -Fq "not as root" <<< "$root_output" || fail \
@@ -102,6 +112,33 @@ for helper_marker in \
   esac
 done
 
+# The rsync convenience wrapper must pin both its SSH config and remote alias;
+# otherwise a caller can silently fall through to unrelated SSH defaults.
+mkdir -p "$TEMP_DIR/guest-home/.ssh" "$TEMP_DIR/mock-bin"
+touch "$TEMP_DIR/guest-home/.ssh/config_kvm_agent_swarm"
+cat > "$TEMP_DIR/mock-bin/rsync" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$MOCK_RSYNC_ARGUMENTS"
+EOF
+chmod 0755 "$TEMP_DIR/mock-bin/rsync"
+MOCK_RSYNC_ARGUMENTS="$TEMP_DIR/rsync-arguments" \
+  PATH="$TEMP_DIR/mock-bin:$PATH" \
+  bash "$TEMP_DIR/MANAGER_RSYNC.rendered.sh" -a ./input/ kvm-agent-worker:/tmp/output/
+grep -Fq -- 'kvm-agent-worker:/tmp/output/' "$TEMP_DIR/rsync-arguments" \
+  || fail "swarm rsync wrapper did not pass its pinned worker operand"
+if MOCK_RSYNC_ARGUMENTS="$TEMP_DIR/rsync-arguments" \
+    PATH="$TEMP_DIR/mock-bin:$PATH" \
+    bash "$TEMP_DIR/MANAGER_RSYNC.rendered.sh" -a ./input/ other-host:/tmp/output/ \
+      >/dev/null 2>&1; then
+  fail "swarm rsync wrapper accepted an unpinned remote host"
+fi
+if MOCK_RSYNC_ARGUMENTS="$TEMP_DIR/rsync-arguments" \
+    PATH="$TEMP_DIR/mock-bin:$PATH" \
+    bash "$TEMP_DIR/MANAGER_RSYNC.rendered.sh" -e 'ssh -F /tmp/other' \
+      ./input/ kvm-agent-worker:/tmp/output/ >/dev/null 2>&1; then
+  fail "swarm rsync wrapper accepted an SSH transport override"
+fi
+
 awk '
   /^install -d -o "\$guest_user" -g "\$guest_group"/ {
     capture = 1
@@ -150,6 +187,7 @@ for required in \
     docs/agent-tools-and-model-services_jp.md \
     docs/formal-methods.md docs/formal-methods_jp.md \
     docs/swarm.md docs/swarm_jp.md \
+    docs/journal.md docs/journal_jp.md \
     docs/troubleshooting.md docs/troubleshooting_jp.md \
     docs/references.md docs/references_jp.md; do
   [[ -s "${REPO_DIR}/${required}" ]] || fail "missing or empty: $required"
@@ -175,6 +213,10 @@ for required_text in \
     "formal-methods=yes" \
     "--swarm-role" \
     "--add-swarm" \
+    "--add-journal" \
+    "--journal-project" \
+    "--journal-allow-remote-reporting" \
+    "readonly JOURNAL_PROVISION_TIMEOUT_SECONDS=1200" \
     "--resize-existing" \
     "id_ed25519_kvm_agent_swarm" \
     "agent-worker" \
@@ -224,6 +266,118 @@ grep -Fq -- 'guest_ssh_to "$GUEST_IP" "$SWARM_PROVISION_TIMEOUT_SECONDS"' "$SETU
   || fail "post-provisioning swarm setup still uses the short SSH probe timeout"
 grep -Fq -- 'sudo tail -n 200 /var/log/kvm-agent-swarm.log' "$SETUP_SCRIPT" \
   || fail "post-provisioning swarm setup does not report its guest log on failure"
+
+for required_journal_text in \
+    'OnCalendar=*-*-* 07:00:00 $timezone' \
+    'OnCalendar=Sat *-*-* 07:10:00 $timezone' \
+    'OnCalendar=*-*-01 07:20:00 $timezone' \
+    'Persistent=true' \
+    'NoNewPrivileges=true' \
+    'ProtectSystem=strict' \
+    'RestrictNamespaces=true' \
+    'PrivateNetwork=true' \
+    '/etc/kvm-agent-journal-projects.json'; do
+  grep -Fq -- "$required_journal_text" \
+    "${REPO_DIR}/journal/install-journal.sh" \
+    || fail "journal installer is missing: $required_journal_text"
+done
+for required_journal_text in \
+    '"codex", "--ask-for-approval", "never", "exec", "--ephemeral"' \
+    '"claude", "--safe-mode", "-p"' \
+    '"--tools", "StructuredOutput"' \
+    'def confinement_canary' \
+    'def reporter_command' \
+    'def sanitized_narrative' \
+    'def resolve_initialized_project' \
+    'GIT_CONFIG_GLOBAL' \
+    'safe.directory=' \
+    'cwd=working_directory' \
+    '"trust": "untrusted_repository_evidence"' \
+    'fallback"] = "evidence-only"' \
+    'os.replace(temporary, path)' \
+    'fcntl.flock'; do
+  grep -Fq -- "$required_journal_text" \
+    "${REPO_DIR}/journal/kvm_agent_journal.py" \
+    || fail "journal runtime is missing: $required_journal_text"
+done
+if grep -Fq -- '"opencode", "run"' \
+    "${REPO_DIR}/journal/kvm_agent_journal.py"; then
+  fail "OpenCode remains available as an unattended journal reporter"
+fi
+
+# --json-schema output arrives through a StructuredOutput tool call, so a
+# blanket tool denial silently disables reporting while still sending the
+# evidence and billing for the call.
+if grep -Fq -- '"--disallowedTools", "*"' \
+    "${REPO_DIR}/journal/kvm_agent_journal.py"; then
+  fail "a blanket tool denial also blocks the reporter's structured-output channel"
+fi
+
+# A test-only escape hatch for a privilege check outlives the test that needed
+# it. The registry's file mode is the control; the root check must have no
+# environment-variable bypass.
+if grep -Fq 'ALLOW_UNPRIVILEGED' "${REPO_DIR}/journal/kvm_agent_journal.py"; then
+  fail "journal runtime still carries a test-only privilege bypass"
+fi
+
+# Registration runs as root against directories a compromised agent controls,
+# so it must not shell out to Git there.
+python3 - "${REPO_DIR}/journal/kvm_agent_journal.py" <<'PY' \
+  || fail "register_project resolves its target with Git"
+import ast, sys
+
+tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+function = next(
+    node for node in ast.walk(tree)
+    if isinstance(node, ast.FunctionDef) and node.name == "register_project"
+)
+called = {
+    node.func.id for node in ast.walk(function)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+}
+raise SystemExit(0 if "resolve_project" not in called else 1)
+PY
+
+# The canary must exercise the same argv as the reporting run, or it proves
+# nothing about the invocation that actually sees repository text.
+python3 - "${REPO_DIR}/journal/kvm_agent_journal.py" <<'PY' \
+  || fail "the confinement canary does not share reporter_command with run_reporter"
+import ast, sys
+
+tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
+functions = {
+    node.name: node for node in ast.walk(tree)
+    if isinstance(node, ast.FunctionDef)
+}
+for name in ("confinement_canary", "run_reporter"):
+    called = {
+        node.func.id for node in ast.walk(functions[name])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    if "reporter_command" not in called:
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+
+# Finalization must verify the outcome of the cloud-init cleanup rather than
+# trusting the exit status of a command whose behaviour varies by release.
+for required_cleanup_text in \
+    'sudo rm -rf -- /var/lib/cloud/instance /var/lib/cloud/instances' \
+    'cleanup is unverifiable' \
+    "A SHA-512 password hash remains in guest cloud-init state." \
+    'cloud-init is disabled and the seed was retained.'; do
+  grep -Fq -- "$required_cleanup_text" "$SETUP_SCRIPT" \
+    || fail "setup script is missing cloud-init cleanup check: $required_cleanup_text"
+done
+# The guest shell is dash. "set -eu" is the backstop for failures the explicit
+# positive controls do not anticipate. A multi-line -F pattern is an
+# alternation, not a literal newline, so check the following line directly.
+awk "
+  /<<.REMOTE_CLOUD_INIT_CLEAN./ { expect = 1; next }
+  expect { found = (\$0 == \"set -eu\"); exit }
+  END { exit(found ? 0 : 1) }
+" "$SETUP_SCRIPT" \
+  || fail "the guest cloud-init cleanup no longer aborts on unexpected errors"
 
 # Swarm roles are independent of libvirt VM names. Keep the primary examples
 # on the repository default and prevent role-looking example names from
@@ -311,6 +465,7 @@ for required_text in \
     "/var/lib/kvm-agent/provisioned" \
     "/var/lib/kvm-agent/provisioning-failed" \
     "/etc/cloud/cloud-init.disabled" \
+    "cloud-init clean --logs" \
     "domifaddr" \
     "domblklist" \
     "--inactive --details" \
@@ -377,7 +532,9 @@ PY
 
 "${SCRIPT_DIR}/mock-setup.sh"
 "${SCRIPT_DIR}/mock-disk-growth.sh"
+"${SCRIPT_DIR}/mock-cloud-init-clean.sh"
 "${SCRIPT_DIR}/mock-swarm-job.sh"
+"${SCRIPT_DIR}/mock-journal.sh"
 "${SCRIPT_DIR}/mock-remove.sh"
 
 echo "Repository checks passed."

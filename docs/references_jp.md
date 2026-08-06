@@ -84,6 +84,13 @@ transfer には通常の OpenSSH を引き続き使います。物理 host は�
 - [Aider with Ollama](https://aider.chat/docs/llms/ollama.html)
 - [Ollama documentation](https://docs.ollama.com/)
 
+任意の journal reporter では、Codex は公式
+[non-interactive mode](https://developers.openai.com/codex/non-interactive-mode) と
+[AGENTS.md](https://developers.openai.com/codex/agent-configuration/agents-md)、
+Claude は公式 [programmatic mode](https://code.claude.com/docs/en/headless) と
+[CLI tool control](https://code.claude.com/docs/en/cli-reference) に従います。
+OpenCode は unattended journal reporter には使いません。
+
 OpenAI に似た URL だけで provider compatibility を推定しません。Client と service の
 現在の文書を確認し、正確な agent workflow を test します。
 

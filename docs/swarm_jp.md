@@ -180,6 +180,11 @@ Fingerprint は worker の SSH host public key から local に読み取りま�
 kvm-agent-swarm-manager-info
 ```
 
+Manager private key は `~/.ssh/id_ed25519_kvm_agent_swarm` です。Scheduled/agent-driven
+job から non-interactive に使うため passphrase なしで生成され、通常 manager guest account が
+所有します。その account が侵害されれば key と、それを authorize した全 worker が露出します。
+これは guest-to-worker key であり、物理 host 用 key ではありません。
+
 `ssh-ed25519` で始まる 1 行全体を copy します。
 
 **worker VM 内の通常 sudo account**で:
@@ -321,8 +326,10 @@ Project instruction の例:
 > directory だけを submit し、status/log を確認して結果を fetch する。Credential、
 > browser data、private SSH key は worker に copy しない。
 
-初めは helper invocation ごとに個別承認してください。任意の `ssh *` を恒久許可するより、
-限定された `kvm-agent-swarm-job` を許可する方が安全です。
+初めは helper invocation ごとに個別承認してください。`kvm-agent-swarm-job` は worker alias、
+working directory、timeout、nice、concurrency を固定するため任意の `ssh *` より operationally
+narrow です。ただし `-- COMMAND [ARG…]` は non-sudo worker account での任意 command なので、
+helper 名自体を command allow-list や security boundary と見なしてはいけません。
 
 ## よくある問題
 

@@ -189,6 +189,13 @@ Inside the **manager VM**:
 kvm-agent-swarm-manager-info
 ```
 
+The manager private key is
+`~/.ssh/id_ed25519_kvm_agent_swarm`. It is generated without a passphrase so
+scheduled and agent-driven jobs can use it non-interactively. It belongs to the
+normal manager guest account; therefore, a compromise of that account exposes
+the key and every worker that authorizes it. This is a guest-to-worker key, not
+a physical-host key.
+
 Copy the complete line beginning with `ssh-ed25519`.
 
 Inside the **worker VM**, still using its normal sudo-capable account:
@@ -334,9 +341,11 @@ A useful project instruction is:
 > required project directory, inspect status and logs, and fetch the results.
 > Never copy credentials, browser data, or private SSH keys to the worker.
 
-Initially approve each helper invocation individually. Granting repeated
-permission to the narrow `kvm-agent-swarm-job` command is safer than allowing
-arbitrary `ssh *` commands.
+Initially approve each helper invocation individually. `kvm-agent-swarm-job`
+is narrower operationally than arbitrary `ssh *`: it fixes the worker alias,
+working directory, timeout, niceness, and concurrency. Its `-- COMMAND [ARG…]`
+payload is still an arbitrary command under the non-sudo worker account, so do
+not treat the helper name itself as a command allow-list or security boundary.
 
 ## Common problems
 

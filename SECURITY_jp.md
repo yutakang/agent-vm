@@ -59,6 +59,13 @@ flowchart TB
 | Remote model/API provider | 設定した client が送信した内容を受け取る。その policy・技術的制御は VM 境界の外。 |
 | 復旧 SSH 鍵 | Host が保持する VM 固有の管理経路。秘密鍵を guest 内へコピーしない。 |
 
+Recovery path の最初の SSH 接続は libvirt lease table から address を選んだ後、
+`StrictHostKeyChecking=accept-new` を使います。これは out-of-band host-key proof ではなく
+trust on first use です。同居する hostile guest が lease address を race・impersonate できれば、
+first contact で confusion/DoS を起こし得ます。Dedicated public-key authentication から host
+private key は漏れず、以後は記録した host key を pin します。任意 swarm pairing path は
+別表示された ED25519 fingerprint を検証するため、より強い first-contact verification です。
+
 Host の `libvirt` group 所属は強い権限です。通常、host device や file を読む VM を
 定義できるためです。host root と同等とみなしてください。非信頼利用者や guest 専用の
 日常 account を host の `libvirt`、`kvm`、sudoers へ追加しないでください。
@@ -115,7 +122,8 @@ account が完全に攻撃者の制御下にあっても成立します。
 - VM 名ごとに別の復旧鍵を host で作る。
 - ゲストパスワードの hash を含む cloud-init seed は root 限定で作成し（domain 実行中は
   libvirt と QEMU が access する）、将来の cloud-init 実行を guest 内で無効化してから
-  プロビジョニング完了後に削除する。
+  guest 内に cache された cloud-init user-data も clean し、プロビジョニング完了後に
+  seed を削除する。
 
 ### Guest 内の既定値
 
@@ -173,6 +181,11 @@ address space は遮断しません。社内 mirror や model endpoint のため
 のは outbound deny rule だけです。UFW は有効なままで、未要求の inbound 通信は拒否
 され、復旧 SSH は引き続き libvirt gateway だけに限定されます。
 
+一般 deny list は `100.64.0.0/10` を意図的に含みません。Opt-in Tailscale swarm が
+`tailscale0` 上でこの CGNAT range を使うためです。一部 ISP・企業・carrier network も
+この range を route します。該当する環境では全 CGNAT destination を Tailscale peer と
+見なさず、guest 外で interface-specific policy を強制してください。
+
 任意の manager/worker profile は一般 LAN access を有効にしません。Tailscale では
 `tailscale0` 上の Tailscale node address への outbound exception、WireGuard では明示的に
 構成した peer 用の `wg0` outbound exception だけを追加します。Worker には同じ overlay
@@ -199,6 +212,29 @@ network を強制してください。より高い保証を目指す一例:
 5. DNS、IPv4、IPv6 に意図しない fallback path がないことを試験する。
 
 Application 設定だけを network security boundary と見なしてはいけません。
+
+## 自動 research journal の data flow
+
+任意 journal の default は deterministic evidence-only report です。この mode の scheduled
+service は private network namespace と outbound IP deny を使い、model provider を呼びません。
+
+Claude/Codex enrichment には named backend と
+`--journal-allow-remote-reporting` の両方を host operator が指定する必要があります。
+Commit subject、changed-file path、project aim、phase state、structured journal prose の
+長さ制限済み metadata が backend の remote provider へ送信されます。Embargo、NDA、ethics
+requirement、provider policy が送信を禁止する project では有効化しないでください。
+
+この threat model では repository text は全て attacker-controlled です。明示的な remote call
+の前に control/bidirectional-formatting character を除去し、text/list size を制限し、evidence を
+空の temporary directory へ copy し、repository ではなくそこで model を起動します。Claude
+には自身の report を返す channel である `StructuredOutput` 以外の tool を与えず、MCP server、
+slash command、project customization を無効化します。Codex には user config/rule の無視、ephemeral、read-only、
+no-approval run を要求します。Output structure と size も検証します。これは影響を限定しますが
+model output を trusted にはしません。Narrative claim を canonical evidence JSON と照合してください。
+
+Scheduled-project registry は root 所有です。これは same-user による偶発的追加を防ぎますが、
+guest administrator 侵害への境界ではありません。通常 guest account は passwordless sudo で
+guest-local guardrail を変更できます。
 
 ## Installer と update の supply chain
 

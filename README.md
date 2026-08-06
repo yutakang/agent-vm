@@ -40,6 +40,11 @@ physical hosts to submit long jobs over Tailscale or WireGuard plus ordinary
 OpenSSH. It is intentionally not enabled for normal users; see
 [Cross-host manager/worker VMs](docs/swarm.md).
 
+An opt-in research-journal profile can also be added to already-running VMs.
+It records meaningful agent events and generates evidence-based daily, weekly,
+and monthly JSON plus static HTML without recreating the guest; see
+[Automatic research journals](docs/journal.md).
+
 The same command can resume interrupted finalization or replace a disposable
 VM. A small removal helper remains available when removal without rebuilding
 is wanted:
@@ -231,6 +236,16 @@ scope, editor behavior, and update model.
 --swarm-role ROLE  Prepare the guest as "manager", "worker", or "both"
 --swarm-network N  Use "tailscale" (default) or "wireguard" for swarm traffic
 --add-swarm ROLE   Add a swarm role to an already-provisioned managed VM
+--add-journal      Add automatic research journals to an existing managed VM
+--journal-project P
+                   Initialize guest-side Git project P; may be repeated
+--journal-backend B
+                   Use evidence (default), claude, or codex reporting
+--journal-allow-remote-reporting
+                   Consent to sending bounded project metadata to the selected
+                   claude/codex provider; required for either remote backend
+--journal-timezone Z
+                   Use IANA timezone Z (default: Europe/Prague)
 --resize-existing  Change persistent RAM and/or vCPU allocation of a powered-
                    off existing VM without deleting it
 --replace-existing Remove the selected existing VM after exact-name
@@ -316,6 +331,29 @@ is the default and raw WireGuard is optional. Provisioning does not enroll
 devices or authorize peers automatically. Read
 [Cross-host manager/worker VMs](docs/swarm.md) before enabling it, including the
 directional-access and risk guidance.
+
+## Automatic research journals for existing VMs
+
+To retrofit an already-provisioned, running VM from its physical host:
+
+```bash
+./setup-kvm-agent.sh \
+  --add-journal \
+  --name kvm-agent \
+  --journal-project /home/agent/PSL_Neural
+```
+
+The project path is inside the guest. Repeat `--journal-project` for multiple
+repositories in the same VM. This operation does not rebuild the guest. It
+adds agent-neutral event instructions, canonical JSON plus static HTML
+reports, and persistent 07:00 daily, Saturday weekly, and first-of-month
+timers. The safe default is deterministic evidence-only reporting with no
+model-provider data transfer. Remote Claude/Codex enrichment is an explicit
+opt-in with a separate consent flag and falls back to evidence-only on failure.
+OpenCode agents may record events but are not used as unattended reporters.
+Read
+[Automatic research journals](docs/journal.md) for the layout, event commands,
+security boundary, and backend behavior.
 
 ## Resume interrupted finalization
 

@@ -19,6 +19,7 @@ readonly IMAGE_DIR="/var/lib/libvirt/images/kvm-agent"
 readonly VM_IMAGE_DIR="${IMAGE_DIR}/vms"
 readonly SSH_COMMAND_TIMEOUT_SECONDS=20
 readonly SWARM_PROVISION_TIMEOUT_SECONDS=1800
+readonly JOURNAL_PROVISION_TIMEOUT_SECONDS=1200
 readonly DEFAULT_DISK_GB=120
 
 VM_NAME="kvm-agent"
@@ -36,6 +37,10 @@ SWARM_ROLE="none"
 SWARM_NETWORK=""
 SWARM_ROLE_OPTION_SET="no"
 ADD_SWARM_ROLE_SET="no"
+JOURNAL_BACKEND="evidence"
+JOURNAL_TIMEZONE="Europe/Prague"
+JOURNAL_PROJECTS=()
+JOURNAL_ALLOW_REMOTE_REPORTING="no"
 
 WORK_DIR=""
 VM_DISK=""
@@ -77,6 +82,24 @@ Options:
                      not enroll a Tailscale device or invent WireGuard peers.
   --add-swarm ROLE   Add the selected swarm role to an already-provisioned VM.
                      Accepts --name, --user, and --swarm-network.
+  --add-journal      Install or update automatic research-journal reporting in
+                     an already-provisioned VM. This does not recreate the VM.
+  --journal-project PATH
+                     Initialize and register this guest-side Git project.
+                     May be repeated. With no project, installs the journal
+                     commands and timers for later `init` plus root `register`.
+  --journal-backend BACKEND
+                     Reporter used by --add-journal: evidence-only "evidence"
+                     (default), "claude", or "codex". Authentication is never
+                     configured here. OpenCode is intentionally unavailable as
+                     an unattended reporter because equivalent confinement has
+                     not been established.
+  --journal-allow-remote-reporting
+                     Explicitly consent to sending bounded project metadata to
+                     the selected model provider. Required for claude/codex.
+  --journal-timezone ZONE
+                     IANA timezone for report periods and timers (default:
+                     Europe/Prague).
   --resize-existing  Change RAM and/or vCPU allocation of an existing, powered
                      off VM without deleting its disk. Use with --memory and/or
                      --vcpus.
@@ -289,6 +312,60 @@ finalize_managed_guest() {
     "sudo test -f /etc/cloud/cloud-init.disabled" || die \
     "Could not verify the cloud-init disable marker; the seed was retained."
 
+  # cloud-init caches the original user-data inside the guest. It contains the
+  # local GUI password hash, so removing only the host-side seed is incomplete.
+  # Keep cloud-init disabled first so a cleanup failure remains fail-closed.
+  #
+  # "cloud-init clean" is best effort. Its exit status and the exact set of
+  # files it removes vary between releases, so the guarantee below comes from
+  # verifying the hazard directly - no cached user-data, cloud-config, or
+  # vendor-data artifact, and no SHA-512 crypt string anywhere under the
+  # cloud-init state and log paths - rather than from trusting that command.
+  log "Removing cached cloud-init user data from the guest"
+  guest_ssh "$(cat <<'REMOTE_CLOUD_INIT_CLEAN'
+set -eu
+
+# An unusable search or a refused sudo would report "nothing found" and read as
+# success, so prove both detectors work on a known-positive file before their
+# negative result is allowed to mean anything.
+probe_directory=/var/lib/cloud/.kvm-agent-clean-probe
+sudo rm -rf -- "$probe_directory"
+sudo mkdir -p -- "$probe_directory"
+sudo tee "$probe_directory/user-data.txt" >/dev/null <<'PROBE'
+hashed_passwd: '$6$probe$probe'
+PROBE
+found_name="$(sudo find /var/lib/cloud -name 'user-data*' -print -quit)"
+[ -n "$found_name" ] || {
+  echo 'Cannot search guest cloud-init state; cleanup is unverifiable.' >&2
+  exit 1
+}
+sudo grep -rqsF '$6$' /var/lib/cloud || {
+  echo 'Cannot scan guest cloud-init state; cleanup is unverifiable.' >&2
+  exit 1
+}
+sudo rm -rf -- "$probe_directory"
+
+sudo cloud-init clean --logs >/dev/null 2>&1 || true
+sudo rm -rf -- /var/lib/cloud/instance /var/lib/cloud/instances
+sudo rm -f -- /var/log/cloud-init.log /var/log/cloud-init-output.log
+
+remaining="$(
+  sudo find /var/lib/cloud \
+    \( -name 'user-data*' -o -name 'cloud-config*' -o -name 'vendor-data*' \) \
+    -print -quit
+)"
+if [ -n "$remaining" ]; then
+  echo "Cached cloud-init artifact remains: $remaining" >&2
+  exit 1
+fi
+if sudo grep -rqsF '$6$' /var/lib/cloud /var/log/cloud-init.log \
+    /var/log/cloud-init-output.log; then
+  echo 'A SHA-512 password hash remains in guest cloud-init state.' >&2
+  exit 1
+fi
+REMOTE_CLOUD_INIT_CLEAN
+  )" || die "Could not clean cached cloud-init user data; cloud-init is disabled and the seed was retained."
+
   if ! reboot_required="$(
       guest_ssh \
         "if test -e /var/run/reboot-required; then printf 'yes\n'; else printf 'no\n'; fi"
@@ -441,6 +518,62 @@ add_swarm_to_managed_guest() {
   log "Swarm profile"
   guest_ssh "kvm-agent-swarm-status" || die \
     "Swarm provisioning completed, but its status could not be read."
+}
+
+add_journal_to_managed_guest() {
+  local installer_b64
+  local projects_b64
+  local projects_json
+  local runtime_b64
+  local journal_source="${SCRIPT_DIR}/journal/kvm_agent_journal.py"
+  local installer_source="${SCRIPT_DIR}/journal/install-journal.sh"
+
+  [[ -r "$SSH_PRIVATE_KEY" ]] || die \
+    "Recovery SSH key not found: $SSH_PRIVATE_KEY. Check --name: the default VM name is 'kvm-agent'."
+  sudo virsh --connect "$LIBVIRT_URI" dominfo "$VM_NAME" >/dev/null 2>&1 || die \
+    "No libvirt VM named '$VM_NAME' exists."
+  [[ -r "$journal_source" && -r "$installer_source" ]] || die \
+    "Journal support files are missing under ${SCRIPT_DIR}/journal. Clone or update the complete repository."
+
+  runtime_b64="$(base64 -w 0 "$journal_source")"
+  installer_b64="$(base64 -w 0 "$installer_source")"
+  projects_json="$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' \
+    "${JOURNAL_PROJECTS[@]}")"
+  projects_b64="$(printf '%s' "$projects_json" | base64 -w 0)"
+
+  ssh_options=(
+    -o BatchMode=yes
+    -o ConnectTimeout=5
+    -o ConnectionAttempts=1
+    -o ForwardAgent=no
+    -o IdentitiesOnly=yes
+    -o ServerAliveCountMax=1
+    -o ServerAliveInterval=5
+    -o StrictHostKeyChecking=accept-new
+    -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS}"
+    -i "$SSH_PRIVATE_KEY"
+  )
+
+  log "Waiting for recovery SSH to the existing guest"
+  GUEST_IP=""
+  wait_for_guest_ssh 60 true || die \
+    "Could not reach '$VM_NAME' through its managed recovery SSH key within five minutes."
+
+  log "Installing automatic research journals with '$JOURNAL_BACKEND' reporting"
+  if ! guest_ssh_to "$GUEST_IP" "$JOURNAL_PROVISION_TIMEOUT_SECONDS" \
+      "sudo install -d -o root -g root -m 0755 /usr/local/lib/kvm-agent-journal && printf '%s' '$runtime_b64' | base64 -d | sudo install -o root -g root -m 0755 /dev/stdin /usr/local/lib/kvm-agent-journal/kvm_agent_journal.py && printf '%s' '$installer_b64' | base64 -d | sudo install -o root -g root -m 0700 /dev/stdin /usr/local/sbin/kvm-agent-journal-provision && sudo /usr/local/sbin/kvm-agent-journal-provision '$GUEST_USER' '$JOURNAL_BACKEND' '$JOURNAL_TIMEZONE' '$projects_b64' '$JOURNAL_ALLOW_REMOTE_REPORTING'"; then
+    warn "Research-journal installation failed inside the existing guest."
+    warn "Recent guest-side journal installation log follows:"
+    guest_ssh \
+      "sudo tail -n 200 /var/log/kvm-agent-journal-install.log 2>/dev/null || true" \
+      >&2 || true
+    die "Review the log above, correct the reported problem, and rerun --add-journal."
+  fi
+
+  log "Research-journal profile"
+  guest_ssh \
+    "cat /var/lib/kvm-agent/journal-profile && kvm-agent-journal status" || die \
+    "Journal installation completed, but its status could not be read."
 }
 
 resize_managed_guest() {
@@ -729,6 +862,7 @@ PUBLIC_KEY_SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'Manager account: %s\n' '$guest_user'
+printf 'Manager private key: %s (no passphrase; guest-local)\n' '$manager_key'
 printf 'Manager public-key fingerprint: '
 ssh-keygen -lf '$manager_key.pub' -E sha256 | awk '{print \$2}'
 printf 'Manager public key (copy this entire line to the worker):\n'
@@ -845,6 +979,30 @@ config='$guest_home/.ssh/config_kvm_agent_swarm'
 [[ -r "\$config" ]] || {
   echo 'Worker is not configured. Run kvm-agent-swarm-configure-worker first.' >&2
   exit 1
+}
+remote_operands=0
+for argument in "\$@"; do
+  case "\$argument" in
+    -e|--rsh|--rsh=*|--rsync-path|--rsync-path=*)
+      echo 'This wrapper does not permit overriding its pinned SSH transport.' >&2
+      exit 2
+      ;;
+    -*)
+      continue
+      ;;
+  esac
+  if [[ "\$argument" == *:* ]]; then
+    [[ "\$argument" == kvm-agent-worker:* \
+        && "\$argument" != kvm-agent-worker::* ]] || {
+      echo 'Remote rsync operands must use the pinned kvm-agent-worker: alias.' >&2
+      exit 2
+    }
+    ((remote_operands += 1))
+  fi
+done
+[[ \$remote_operands -eq 1 ]] || {
+  echo 'Specify exactly one kvm-agent-worker: remote operand.' >&2
+  exit 2
 }
 printf -v remote_shell 'ssh -F %q' "\$config"
 exec rsync -e "\$remote_shell" "\$@"
@@ -1298,6 +1456,29 @@ while (($# > 0)); do
       SWARM_ROLE="$2"
       shift 2
       ;;
+    --add-journal)
+      select_operation "add-journal" "--add-journal"
+      shift
+      ;;
+    --journal-project)
+      (($# >= 2)) || die "--journal-project requires a guest-side path."
+      JOURNAL_PROJECTS+=("$2")
+      shift 2
+      ;;
+    --journal-backend)
+      (($# >= 2)) || die "--journal-backend requires a value."
+      JOURNAL_BACKEND="$2"
+      shift 2
+      ;;
+    --journal-allow-remote-reporting)
+      JOURNAL_ALLOW_REMOTE_REPORTING="yes"
+      shift
+      ;;
+    --journal-timezone)
+      (($# >= 2)) || die "--journal-timezone requires a value."
+      JOURNAL_TIMEZONE="$2"
+      shift 2
+      ;;
     --resize-existing)
       select_operation "resize" "--resize-existing"
       shift
@@ -1334,6 +1515,27 @@ fi
 if [[ "$SWARM_ROLE" == "none" && -n "$SWARM_NETWORK" ]]; then
   die "--swarm-network requires --swarm-role or --add-swarm."
 fi
+case "$JOURNAL_BACKEND" in
+  claude|codex|evidence) ;;
+  *) die "Journal backend must be 'claude', 'codex', or 'evidence'." ;;
+esac
+[[ "$JOURNAL_TIMEZONE" =~ ^[A-Za-z_+-]+(/[A-Za-z0-9_+-]+)+$ ]] || die \
+  "--journal-timezone must be an IANA name such as Europe/Prague."
+if [[ "$OPERATION" != "add-journal" ]]; then
+  [[ ${#JOURNAL_PROJECTS[@]} -eq 0 \
+      && "$JOURNAL_BACKEND" == "evidence" \
+      && "$JOURNAL_TIMEZONE" == "Europe/Prague" \
+      && "$JOURNAL_ALLOW_REMOTE_REPORTING" == "no" ]] || die \
+    "--journal-project, --journal-backend, --journal-allow-remote-reporting, and --journal-timezone require --add-journal."
+fi
+if [[ "$JOURNAL_BACKEND" == "evidence" \
+    && "$JOURNAL_ALLOW_REMOTE_REPORTING" == "yes" ]]; then
+  die "--journal-allow-remote-reporting requires --journal-backend claude or codex."
+fi
+if [[ "$JOURNAL_BACKEND" != "evidence" \
+    && "$JOURNAL_ALLOW_REMOTE_REPORTING" != "yes" ]]; then
+  die "--journal-backend $JOURNAL_BACKEND sends project metadata to a model provider; add --journal-allow-remote-reporting to consent explicitly."
+fi
 
 [[ $EUID -ne 0 ]] || die \
   "Run this script as your ordinary host account, not as root or through sudo."
@@ -1367,6 +1569,17 @@ if [[ "$OPERATION" == "add-swarm" ]]; then
       && "$RESTRICT_PRIVATE_NETWORKS" == "yes" \
       && "$WITH_FORMAL_METHODS" == "no" ]] || die \
     "--add-swarm accepts only --name, --user, and --swarm-network."
+fi
+if [[ "$OPERATION" == "add-journal" ]]; then
+  [[ "$REPLACE_EXISTING" == "no" \
+      && -z "$RAM_MB" && -z "$VCPUS" \
+      && "$DISK_GB" == "$DEFAULT_DISK_GB" \
+      && "$WAIT_FOR_GUEST" == "yes" \
+      && "$RESTRICT_PRIVATE_NETWORKS" == "yes" \
+      && "$WITH_FORMAL_METHODS" == "no" \
+      && "$SWARM_ROLE" == "none" \
+      && -z "$SWARM_NETWORK" ]] || die \
+    "--add-journal accepts only --name, --user, and journal options."
 fi
 if [[ "$OPERATION" == "resize" ]]; then
   [[ "$REPLACE_EXISTING" == "no" \
@@ -1449,6 +1662,26 @@ if [[ "$OPERATION" == "add-swarm" ]]; then
     printf '  sudo kvm-agent-swarm-authorize\n'
   fi
   printf 'See docs/swarm.md for the ordered pairing procedure.\n'
+  exit 0
+fi
+
+if [[ "$OPERATION" == "add-journal" ]]; then
+  log "Authorising post-provisioning research-journal setup"
+  sudo -v
+  if [[ "$JOURNAL_ALLOW_REMOTE_REPORTING" == "yes" ]]; then
+    warn "Remote journal reporting is enabled. Bounded commit subjects, changed-file paths, project aims, phase state, and structured journal prose will be sent from the guest to the '$JOURNAL_BACKEND' provider. Repository text is untrusted and may influence report content even though tools are confined."
+  else
+    log "Using deterministic evidence-only reports; no journal data is sent to a model provider"
+  fi
+  add_journal_to_managed_guest
+  log "KVM-Agent research-journal setup completed"
+  printf 'Guest address: %s\n' "$GUEST_IP"
+  printf '\nJournal commands inside the guest:\n'
+  printf '  kvm-agent-journal status\n'
+  printf '  kvm-agent-journal init /path/to/another/project\n'
+  printf '  sudo kvm-agent-journal register /path/to/another/project\n'
+  printf '  kvm-agent-journal report daily --all\n'
+  printf 'See docs/journal.md for report contents, evidence rules, and timers.\n'
   exit 0
 fi
 
@@ -1742,6 +1975,7 @@ SSH_PUBLIC_KEY="${public_key_type} ${public_key_data}"
 log "Choosing the guest's local GUI password"
 printf 'This password is used only for the %s account inside the VM.\n' "$GUEST_USER"
 printf 'SSH password login remains disabled.\n'
+printf 'Use a unique password: its hash exists in guest cloud-init state until verified final cleanup.\n'
 read -r -s -p "Guest password (at least 8 characters): " guest_password
 printf '\n'
 ((${#guest_password} >= 8)) || die "Guest password is shorter than 8 characters."

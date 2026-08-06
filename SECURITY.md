@@ -60,6 +60,15 @@ flowchart TB
 | Remote model or API provider | Receives whatever the configured client sends. Its policy and technical controls are outside this VM boundary. |
 | Recovery SSH key | Host-held, per-VM administrative path. It is not copied into the guest as a private key. |
 
+The recovery path's first SSH connection uses
+`StrictHostKeyChecking=accept-new` after selecting an address from the libvirt
+lease table. That is trust on first use, not an out-of-band host-key proof. A
+hostile co-resident guest able to race or impersonate that leased address could
+cause confusion or denial of service during first contact. Dedicated
+public-key authentication does not disclose the host private key, and later
+connections pin the recorded host key. The optional swarm pairing path is
+stronger: it verifies an independently displayed ED25519 fingerprint.
+
 Membership in the host `libvirt` group is highly privileged: it commonly permits
 defining a VM that reads host devices or files. Treat it as equivalent to host
 root. Do not add untrusted or routine guest-only accounts to `libvirt`, `kvm`,
@@ -126,8 +135,8 @@ controlled by an attacker.
 - the host generates a separate recovery key for each VM name; and
 - the cloud-init seed, which carries the guest password hash, is created
   root-only — libvirt and QEMU still access it while the domain runs — and is
-  removed once provisioning finishes; future cloud-init runs are disabled in
-  the guest first.
+  removed once provisioning finishes; future cloud-init runs are disabled and
+  cached guest-side cloud-init user-data is cleaned first.
 
 ### Defaults inside the guest
 
@@ -189,6 +198,12 @@ endpoint genuinely requires private-range egress. That option omits only these
 outbound deny rules: UFW remains enabled, unsolicited inbound traffic remains
 denied, and recovery SSH remains limited to the libvirt gateway.
 
+The general deny list intentionally does not cover `100.64.0.0/10`, because an
+opt-in Tailscale swarm uses that CGNAT range on `tailscale0`. Some ISP,
+corporate, or carrier networks also route this range. If that matters in your
+environment, enforce interface-specific policy outside the guest rather than
+assuming every CGNAT destination is a Tailscale peer.
+
 The optional manager/worker profile does not enable general LAN access. It adds
 an outbound exception on `tailscale0` for Tailscale node addresses, or on `wg0`
 for explicitly configured WireGuard peers. A worker also receives an inbound
@@ -216,6 +231,34 @@ outside this script. A useful higher-assurance pattern is:
 5. test that DNS, IPv4, and IPv6 cannot provide an unintended fallback path.
 
 Application settings alone are not a network security boundary.
+
+## Automatic research-journal data flow
+
+The optional journal defaults to deterministic evidence-only reporting. In
+that mode the scheduled service receives a private network namespace and an
+outbound IP deny rule; it does not call a model provider.
+
+Claude or Codex enrichment requires the host operator to supply both a named
+backend and `--journal-allow-remote-reporting`. This sends bounded repository
+metadata—including commit subjects, changed-file paths, the project aim, phase
+state, and structured journal prose—to that backend's remote provider. Do not
+enable it when the project's embargo, NDA, ethics requirements, or provider
+policy prohibit that transfer.
+
+All repository text is attacker-controlled in this threat model. Before an
+explicit remote call, the journal strips control and bidirectional-formatting
+characters, caps text/list sizes, copies the evidence into an empty temporary
+directory, and starts the model there rather than in the repository. Claude is
+given no tool except `StructuredOutput`, the channel through which it returns
+its own report; MCP servers, slash commands, and project customizations are
+disabled. Codex is requested to ignore user config/rules
+and use an ephemeral read-only, no-approval run. Output size and structure are
+validated. These measures bound consequences but do not make model output
+trusted; verify narrative claims against the canonical evidence JSON.
+
+The scheduled-project registry is root-owned. This prevents accidental
+same-user additions, not a compromised guest administrator: the normal guest
+account has passwordless sudo and can alter any guest-local guardrail.
 
 ## Installer and update supply chain
 

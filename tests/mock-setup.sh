@@ -11,17 +11,16 @@ REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 TEMP_DIR="$(mktemp -d)"
 trap 'rm -rf -- "$TEMP_DIR"' EXIT
 
-chmod 0755 "$TEMP_DIR"
+chmod 0700 "$TEMP_DIR"
 mkdir -p \
   "$TEMP_DIR/bin" \
   "$TEMP_DIR/home" \
   "$TEMP_DIR/images/vms" \
   "$TEMP_DIR/keyrings" \
   "$TEMP_DIR/state"
-chmod 0777 "$TEMP_DIR/home" "$TEMP_DIR/images" \
-  "$TEMP_DIR/images/vms" "$TEMP_DIR/state"
 touch "$TEMP_DIR/dev-kvm"
 touch "$TEMP_DIR/keyrings/ubuntu-cloudimage-keyring.gpg"
+printf 'mock ubuntu image\n' > "$TEMP_DIR/cloud-source.img"
 
 cat > "$TEMP_DIR/os-release" <<'EOF'
 ID=ubuntu
@@ -35,6 +34,7 @@ MemTotal:       33554432 kB
 EOF
 
 cp "$REPO_DIR/setup-kvm-agent.sh" "$TEMP_DIR/setup-under-test.sh"
+cp -R "$REPO_DIR/journal" "$TEMP_DIR/journal"
 cat > "$TEMP_DIR/remove-kvm-agent.sh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" > "$MOCK_STATE/remove-arguments"
@@ -64,12 +64,15 @@ sed -i \
   -e 's/^\[\[ -t 0 \]\] || die .*$/true # interactive-terminal check covered separately/' \
   "$TEMP_DIR/setup-under-test.sh"
 chmod 0755 "$TEMP_DIR/setup-under-test.sh"
-
-printf 'mock ubuntu image\n' > \
-  "$TEMP_DIR/images/ubuntu-24.04-server-cloudimg-amd64.img"
-sha256sum "$TEMP_DIR/images/ubuntu-24.04-server-cloudimg-amd64.img" \
-  | awk '{ print $1 }' > \
-    "$TEMP_DIR/images/ubuntu-24.04-server-cloudimg-amd64.img.sha256"
+grep -Fq "readonly IMAGE_DIR=\"${TEMP_DIR}/images\"" \
+  "$TEMP_DIR/setup-under-test.sh" || {
+    echo 'Temporary setup copy did not redirect IMAGE_DIR.' >&2
+    exit 1
+  }
+grep -Fq "${TEMP_DIR}/os-release" "$TEMP_DIR/setup-under-test.sh" || {
+  echo 'Temporary setup copy did not redirect os-release.' >&2
+  exit 1
+}
 
 cat > "$TEMP_DIR/bin/id" <<'EOF'
 #!/usr/bin/env bash
@@ -100,6 +103,65 @@ EOF
 cat > "$TEMP_DIR/bin/nproc" <<'EOF'
 #!/usr/bin/env bash
 echo 8
+EOF
+
+cat > "$TEMP_DIR/bin/df" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"-PB1"* ]]; then
+  cat <<'OUTPUT'
+Filesystem 1048576-blocks Used Available Capacity Mounted on
+mockfs 214748364800 1073741824 213674622976 1% /mock
+OUTPUT
+else
+  /usr/bin/df "$@"
+fi
+EOF
+
+cat > "$TEMP_DIR/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+output=''
+url=''
+while (($#)); do
+  case "$1" in
+    --output)
+      output="$2"
+      shift 2
+      ;;
+    https://*)
+      url="$1"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+[[ -n "$output" && -n "$url" ]]
+case "${url##*/}" in
+  SHA256SUMS)
+    hash="$(sha256sum "$MOCK_CLOUD_IMAGE" | awk '{print $1}')"
+    printf '%s  ubuntu-24.04-server-cloudimg-amd64.img\n' "$hash" > "$output"
+    ;;
+  SHA256SUMS.gpg)
+    printf 'mock detached signature\n' > "$output"
+    ;;
+  ubuntu-24.04-server-cloudimg-amd64.img)
+    cp "$MOCK_CLOUD_IMAGE" "$output"
+    ;;
+  *)
+    echo "Unexpected mocked curl URL: $url" >&2
+    exit 1
+    ;;
+esac
+EOF
+
+cat > "$TEMP_DIR/bin/gpgv" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" > "$MOCK_STATE/gpgv-arguments"
+[[ "${MOCK_GPGV_FAIL:-no}" != yes ]]
+touch "$MOCK_STATE/gpgv-verified"
 EOF
 
 cat > "$TEMP_DIR/bin/ssh-keygen" <<'EOF'
@@ -336,6 +398,11 @@ if [[ "$remote_command" == \
   [[ -f "$MOCK_STATE/cloud-init-disabled" ]]
   exit
 fi
+if [[ "$all_arguments" == *"sudo cloud-init clean --logs"* ]]; then
+  [[ -f "$MOCK_STATE/cloud-init-disabled" ]] || exit 1
+  touch "$MOCK_STATE/cloud-init-cleaned"
+  exit 0
+fi
 if [[ "$all_arguments" == *"installed-versions.txt"* ]]; then
   cat <<'OUTPUT'
 Provisioned: 2026-07-28T00:00:00+00:00
@@ -402,7 +469,23 @@ chmod 0755 "$TEMP_DIR/bin/"*
 export MOCK_STATE="$TEMP_DIR/state"
 export MOCK_IMAGES="$TEMP_DIR/images"
 export MOCK_HOME="$TEMP_DIR/home"
+export MOCK_CLOUD_IMAGE="$TEMP_DIR/cloud-source.img"
 MOCK_PATH="$TEMP_DIR/bin:$PATH"
+
+# Exercise the signed-manifest path itself.  A failed signature must stop before
+# the base image, VM disk, or domain is installed.
+if env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" MOCK_GPGV_FAIL=yes \
+    "$TEMP_DIR/setup-under-test.sh" \
+      --name mock-agent --memory 8192 --vcpus 2 \
+      > "$TEMP_DIR/gpgv-failure-output" 2>&1; then
+  echo "Setup unexpectedly accepted a failed Ubuntu manifest signature." >&2
+  exit 1
+fi
+[[ -s "$MOCK_STATE/gpgv-arguments" ]]
+[[ ! -e "$TEMP_DIR/images/ubuntu-24.04-server-cloudimg-amd64.img" ]]
+[[ ! -e "$TEMP_DIR/images/vms/mock-agent.qcow2" ]]
+[[ ! -e "$MOCK_STATE/domain-defined" ]]
+rm -f -- "$MOCK_STATE/gpgv-arguments"
 
 printf 'mockpass123\nmockpass123\n' \
   | env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
@@ -412,6 +495,8 @@ printf 'mockpass123\nmockpass123\n' \
       > "$TEMP_DIR/output"
 
 grep -Fq "KVM-Agent setup completed" "$TEMP_DIR/output"
+[[ -f "$MOCK_STATE/gpgv-verified" ]]
+[[ -s "$MOCK_STATE/gpgv-arguments" ]]
 grep -Fq "codex-cli mock" "$TEMP_DIR/output"
 grep -Fq "Formal tools:   Lean 4, Isabelle/HOL, GHC, Cabal, HLS, HLint" \
   "$TEMP_DIR/output"
@@ -427,6 +512,7 @@ grep -Fq "resize $TEMP_DIR/images/vms/mock-agent.qcow2 120G" \
 [[ -f "$TEMP_DIR/images/vms/mock-agent.qcow2" ]]
 [[ -f "$MOCK_STATE/seed-ejected" ]]
 [[ -f "$MOCK_STATE/cloud-init-disabled" ]]
+[[ -f "$MOCK_STATE/cloud-init-cleaned" ]]
 [[ ! -e "$TEMP_DIR/images/vms/mock-agent-seed.img" ]]
 [[ -f "$TEMP_DIR/home/.local/share/kvm-agent/mock-agent/id_ed25519" ]]
 grep -Fxq "formal-methods=yes" \
@@ -453,6 +539,31 @@ env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
 grep -Fq "Adding the 'worker' swarm role with 'tailscale' networking" \
   "$TEMP_DIR/add-swarm-output"
 grep -Fq "KVM-Agent swarm setup completed" "$TEMP_DIR/add-swarm-output"
+
+if env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
+    "$TEMP_DIR/setup-under-test.sh" \
+      --add-journal --name mock-agent --user agent \
+      --journal-project /home/agent/Project_A \
+      --journal-backend claude \
+      > "$TEMP_DIR/journal-consent-output" 2>&1; then
+  echo "Journal setup unexpectedly enabled remote reporting without consent." >&2
+  exit 1
+fi
+grep -Fq -- "--journal-allow-remote-reporting" \
+  "$TEMP_DIR/journal-consent-output"
+
+env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
+  "$TEMP_DIR/setup-under-test.sh" \
+    --add-journal --name mock-agent --user agent \
+    --journal-project /home/agent/Project_A \
+    --journal-project /home/agent/Project_B \
+    --journal-backend claude --journal-allow-remote-reporting \
+    --journal-timezone Europe/Prague \
+    > "$TEMP_DIR/add-journal-output"
+grep -Fq "Installing automatic research journals with 'claude' reporting" \
+  "$TEMP_DIR/add-journal-output"
+grep -Fq "KVM-Agent research-journal setup completed" \
+  "$TEMP_DIR/add-journal-output"
 
 : > "$MOCK_STATE/resource-changes"
 env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \

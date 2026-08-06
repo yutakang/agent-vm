@@ -230,6 +230,16 @@ hlint --version
 --swarm-role ROLE  guest を "manager"、"worker"、または "both" として準備する
 --swarm-network N  swarm 通信に "tailscale"（既定）または "wireguard" を使う
 --add-swarm ROLE   provisioning 済みの管理対象 VM に swarm role を追加する
+--add-journal      既存の管理対象 VM に自動 research journal を追加する
+--journal-project P
+                   guest 内の Git project P を初期化する。複数回指定可能
+--journal-backend B
+                   evidence（既定）、claude、codex のいずれか
+--journal-allow-remote-reporting
+                   長さ制限済み project metadata の provider 送信に同意する。
+                   claude/codex backend では必須
+--journal-timezone Z
+                   IANA timezone Z（既定: Europe/Prague）
 --resize-existing  powered-off の既存 VM を削除せず、永続 RAM/vCPU 割当を変更する
 --replace-existing 指定した既存 VM を正確な名前の確認後に削除し、再作成する
 --finalize-existing
@@ -309,6 +319,27 @@ state が以前の resource configuration を復元することを防ぎます�
 Provisioning は device enrollment や peer authorization を自動化しません。
 Directional access と risk の説明を含む
 [cross-host manager/worker VM](docs/swarm_jp.md)を有効化前に読んでください。
+
+## 既存 VM の自動 research journal
+
+Provisioning 済みで起動中の VM に、物理 host から後付けできます。
+
+```bash
+./setup-kvm-agent.sh \
+  --add-journal \
+  --name kvm-agent \
+  --journal-project /home/agent/PSL_Neural
+```
+
+Project path は guest 内の path です。同じ VM の複数 repository には
+`--journal-project` を繰り返します。VM は再作成しません。Agent-neutral な event
+instruction、canonical JSON と static HTML report、07:00 daily、土曜 weekly、毎月1日の
+persistent timer を追加します。安全な既定値は model provider へ data を送らない deterministic
+evidence-only report です。Claude/Codex enrichment は別の consent flag を必要とする opt-in
+で、失敗時は evidence-only へ fallback します。OpenCode agent も event は記録できますが、
+unattended reporter には使いません。Layout、event command、
+security boundary、backend の詳細は
+[自動 research journal](docs/journal_jp.md)を参照してください。
 
 ## 中断した finalization を再開する
 
