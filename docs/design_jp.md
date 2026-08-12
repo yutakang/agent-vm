@@ -178,8 +178,11 @@ Setup script は次を作ります。
 ```
 
 Guest へ入るのは public key だけです。Password 認証、root login、SSH agent
-forwarding、X11 forwarding は無効です。この key は provisioning status の確認と
-GUI が使えない場合の復旧用です。日常作業は完全に `virt-manager` 内だけでも構いません。
+forwarding、X11 forwarding、tunnel、port forwarding は既定で無効です。この key は
+provisioning status の確認と GUI が使えない場合の復旧用です。導入済み
+`kvm-agent-host` wrapper が対応する client restriction を自動適用します。日常作業は
+完全に `virt-manager` 内だけでも構いません。[安全なリモートアクセス](remote-access_jp.md)
+も参照してください。
 
 Host key は VM ごとの `known_hosts` へ保存します。同じ VM 名の扱いが、他の SSH
 接続の global host-key 判断と黙って共有されません。

@@ -16,13 +16,14 @@ KVM-Agent が作成した recovery key が残っている必要があります�
   --add-journal \
   --name kvm-agent \
   --user agent \
-  --journal-project /home/agent/PSL_Neural \
-  --journal-project /home/agent/Another_Project \
-  --journal-timezone Europe/Prague
+  --journal-project /home/agent/YOUR_PROJECT_A \
+  --journal-project /home/agent/YOUR_PROJECT_B
 ```
 
 これが推奨 default です。Guest 内で deterministic な report を自動生成し、journal data
-を model provider へ送信しません。
+を model provider へ送信しません。`YOUR_PROJECT_A` と `YOUR_PROJECT_B` は placeholder
+です。既定 timezone は `Etc/UTC` です。別の local reporting boundary が必要な場合だけ
+`--journal-timezone YOUR_IANA_TIMEZONE` を追加します。
 
 `--journal-project` は host ではなく **guest 内の path** で、複数回指定できます。
 対象は既存の Git worktree でなければなりません。この操作は VM の shutdown、再作成、
@@ -33,8 +34,8 @@ timer を導入し、指定 repository を初期化します。同じ command �
 Repository を後で選ぶ場合は `--journal-project` を省略します。その後 guest 内で:
 
 ```bash
-kvm-agent-journal init /home/agent/Project
-sudo kvm-agent-journal register /home/agent/Project
+kvm-agent-journal init /home/agent/YOUR_PROJECT
+sudo kvm-agent-journal register /home/agent/YOUR_PROJECT
 ```
 
 `init` は project file を作成・更新し、root-only の `register` が unattended timer の
@@ -142,11 +143,14 @@ consent flag が必要です。
   --add-journal \
   --name kvm-agent \
   --user agent \
-  --journal-project /home/agent/PSL_Neural \
+  --journal-project /home/agent/YOUR_PROJECT \
   --journal-backend claude \
   --journal-allow-remote-reporting \
-  --journal-timezone Europe/Prague
+  --journal-timezone YOUR_IANA_TIMEZONE
 ```
+
+`YOUR_PROJECT` と `YOUR_IANA_TIMEZONE` は placeholder です。実際の timezone 値の例は
+`Europe/Prague` です。
 
 この flag により、長さを制限した以下の metadata が VM 外の provider へ送信され得ます。
 

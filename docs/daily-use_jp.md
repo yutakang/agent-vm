@@ -79,77 +79,44 @@ Host folder は自動共有しません。ローカル VM であっても guest 
 実用的で比較的安全な選択肢:
 
 1. Public または権限を狭く限定した repository を guest 内で clone する。
-2. Review 済み file を host から開始する `scp` で転送する。
+2. Review 済み file を host helper で転送する。
 3. Guest から小さな patch を export して host で review する。
 4. 専用の短期 Git branch と scope 限定 token を使う。
 
-Setup script は専用の復旧鍵を host 上に作り、その公開鍵だけを guest へ登録済みです。
-既定 VM 用の再利用可能な shell variable を次のように準備します。
+Setup は、現在の VM address を検出し、専用復旧鍵を guest へ渡さず使う
+`kvm-agent-host` を導入します。既定 VM の例では、物理 Ubuntu host から
+project を guest へ次のように送ります。
 
 ```bash
-VM_NAME=kvm-agent
-VM_USER=agent
-KEY_DIR="$HOME/.local/share/kvm-agent/$VM_NAME"
-VM_IP="$(
-  sudo virsh --connect qemu:///system \
-    domifaddr "$VM_NAME" --source lease |
-    awk '$3 == "ipv4" { sub(/\/.*/, "", $4); print $4; exit }'
-)"
-test -n "$VM_IP" || {
-  echo "Guest IPv4 address が見つかりません。VM を起動して再実行してください。" >&2
-  exit 1
-}
-test -r "$KEY_DIR/id_ed25519" || {
-  echo "Recovery key が見つかりません: $KEY_DIR/id_ed25519" >&2
-  exit 1
-}
-
-SSH_OPTS=(
-  -o BatchMode=yes
-  -o ConnectTimeout=10
-  -o ForwardAgent=no
-  -o IdentitiesOnly=yes
-  -o IdentityAgent=none
-  -o StrictHostKeyChecking=accept-new
-  -o "UserKnownHostsFile=$KEY_DIR/known_hosts"
-  -i "$KEY_DIR/id_ed25519"
-)
+kvm-agent-host push kvm-agent ./my-project Work/
 ```
 
-Project を host から guest へコピーします。
-
-```bash
-scp "${SSH_OPTS[@]}" -r ./my-project \
-  "$VM_USER@$VM_IP:/home/$VM_USER/"
-```
-
-Guest の結果を host の隔離 directory へコピーします。
-
-```bash
-mkdir -p "$HOME/vm-extraction-quarantine"
-chmod 700 "$HOME/vm-extraction-quarantine"
-
-scp "${SSH_OPTS[@]}" -r \
-  "$VM_USER@$VM_IP:/home/$VM_USER/Work/my-project" \
-  "$HOME/vm-extraction-quarantine/"
-```
-
-File 一つなら `-r` を外します。両方向とも host から操作を開始するため、host の復旧
-private key を guest へ渡す必要はありません。Host SSH private key を guest へ
-コピーしたり SSH agent forwarding を有効にしたりしてはいけません。
-
-Host home 全体の recursive copy は避けてください。Browser profile、password-manager
-vault、cloud 設定 directory、signing key、その他の長期 credential を利便性だけのために
-コピーしてはいけません。
-
-出力には working tree 全体より、確認しやすい patch を使う方が通常は安全です。
-Guest 内で:
+Guest 内で確認しやすい小さな patch を作ります。
 
 ```bash
 git diff --binary > agent-result.patch
 ```
 
-Patch を `scp` で外へ出し、別 directory で確認・test してから、重要 repository へ
+信頼する host から取り出します。既定の保存先は mode `0700` の
+`~/vm-extraction-quarantine/kvm-agent/` です。
+
+```bash
+kvm-agent-host pull kvm-agent Work/agent-result.patch
+```
+
+ここで `kvm-agent` は libvirt VM 名の例です。異なる `--name` を使った場合は
+置き換えてください。両方向とも信頼する host から開始します。Host SSH private key を
+guest へコピーしたり SSH agent forwarding を有効にしたりしてはいけません。
+
+別の信頼する Mac では Mac 専用の別鍵を使い、Mac から `scp` を開始します。
+Host の復旧鍵をコピーせず、[安全なリモートアクセス](remote-access_jp.md#macos-から-data-を転送する)
+の手順に従ってください。
+
+Host home 全体の recursive copy は避けてください。Browser profile、password-manager
+vault、cloud 設定 directory、signing key、その他の長期 credential を利便性だけのために
+コピーしてはいけません。
+
+Patch を別 directory で確認・test してから、重要 repository へ
 apply/commit します。侵害された可能性がある guest からコピーした file はすべて非信頼
 として扱い、review 前に実行、build、IDE workspace としての open を行わないでください。
 
@@ -163,19 +130,17 @@ sudo apt update
 sudo apt install libguestfs-tools
 ```
 
-既定の disk 配置では次を実行します。
+既定 VM 名と disk 配置の例では次を実行します。
 
 ```bash
-VM_NAME=kvm-agent
-VM_DISK="/var/lib/libvirt/images/kvm-agent/vms/$VM_NAME.qcow2"
-DEST="$HOME/vm-extraction-quarantine"
-
-sudo virsh --connect qemu:///system domstate "$VM_NAME"
-mkdir -p "$DEST"
-chmod 700 "$DEST"
-sudo guestfish --ro --format=qcow2 -a "$VM_DISK" -i \
-  copy-out /home/agent/Work/my-project "$DEST"
-sudo chown -R "$USER:$USER" "$DEST"
+sudo virsh --connect qemu:///system domstate kvm-agent
+mkdir -p "$HOME/vm-extraction-quarantine/kvm-agent"
+chmod 700 "$HOME/vm-extraction-quarantine/kvm-agent"
+sudo guestfish --ro --format=qcow2 \
+  -a /var/lib/libvirt/images/kvm-agent/vms/kvm-agent.qcow2 -i \
+  copy-out /home/agent/Work/my-project \
+  "$HOME/vm-extraction-quarantine/kvm-agent"
+sudo chown -R "$USER:$USER" "$HOME/vm-extraction-quarantine/kvm-agent"
 ```
 
 `domstate` が `shut off` と表示した場合だけ続行してください。Offline 抽出は `scp` より
@@ -183,13 +148,10 @@ sudo chown -R "$USER:$USER" "$DEST"
 
 ## 復旧 SSH
 
-既定 VM の例:
+既定 VM では、導入済み host helper を使います。
 
 ```bash
-ssh -o ForwardAgent=no \
-  -o IdentitiesOnly=yes \
-  -i ~/.local/share/kvm-agent/kvm-agent/id_ed25519 \
-  agent@VM_ADDRESS
+kvm-agent-host ssh kvm-agent
 ```
 
 Guest 内の確認 command:
@@ -204,8 +166,10 @@ systemctl status gdm3 qemu-guest-agent ollama --no-pager
 ss -ltnp | grep 11434
 ```
 
+Helper は guest host key を固定し、agent、X11、port forwarding を無効化します。
 復旧 private key は host に残します。Guest へ copy したり、別 SSH agent を VM へ
-forward したりしないでください。
+forward したりしないでください。脅威 model と macOS controller setup は
+[安全なリモートアクセス](remote-access_jp.md)を参照してください。
 
 ## Agent tool の更新
 

@@ -10,11 +10,17 @@ umask 077
 # coding-agent and optional formal-methods installers execute inside the guest,
 # never on the host.
 
-readonly GUEST_RELEASE="24.04"
+readonly GUEST_RELEASE="26.04"
 readonly GUEST_ARCH="amd64"
+readonly GUEST_OSINFO_PREFERRED="ubuntu${GUEST_RELEASE}"
+readonly GUEST_OSINFO_COMPATIBILITY="ubuntu24.04"
+readonly HOST_OS_RELEASE="/etc/os-release"
 readonly LIBVIRT_URI="qemu:///system"
 readonly LIBVIRT_NETWORK="default"
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly HOST_HELPER_SOURCE="${SCRIPT_DIR}/host/kvm-agent-host"
+readonly GUEST_CONTROLLER_HELPER_SOURCE="${SCRIPT_DIR}/guest/kvm-agent-authorize-controller-key"
+readonly GUEST_SSH_HARDENER_SOURCE="${SCRIPT_DIR}/guest/kvm-agent-harden-ssh"
 readonly IMAGE_DIR="/var/lib/libvirt/images/kvm-agent"
 readonly VM_IMAGE_DIR="${IMAGE_DIR}/vms"
 readonly SSH_COMMAND_TIMEOUT_SECONDS=20
@@ -23,6 +29,7 @@ readonly JOURNAL_PROVISION_TIMEOUT_SECONDS=1200
 readonly DEFAULT_DISK_GB=120
 
 VM_NAME="kvm-agent"
+VM_NAME_OPTION_SET="no"
 GUEST_USER="agent"
 RAM_MB=""
 VCPUS=""
@@ -33,14 +40,17 @@ GATEWAY_ADDRESS=""
 OPERATION="create"
 REPLACE_EXISTING="no"
 WITH_FORMAL_METHODS="no"
+ALLOW_REMOTE_EDITOR="no"
+SSH_FORWARDING_MODE="no"
 SWARM_ROLE="none"
 SWARM_NETWORK=""
 SWARM_ROLE_OPTION_SET="no"
 ADD_SWARM_ROLE_SET="no"
 JOURNAL_BACKEND="evidence"
-JOURNAL_TIMEZONE="Europe/Prague"
+JOURNAL_TIMEZONE="Etc/UTC"
 JOURNAL_PROJECTS=()
 JOURNAL_ALLOW_REMOTE_REPORTING="no"
+GUEST_OSINFO=""
 
 WORK_DIR=""
 VM_DISK=""
@@ -52,12 +62,13 @@ usage() {
 Usage:
   ./setup-kvm-agent.sh [OPTIONS]
 
-Create a graphical Ubuntu 24.04 LTS KVM guest and install Codex, Claude Code,
+Create a graphical Ubuntu 26.04 LTS KVM guest and install Codex, Claude Code,
 OpenCode, Aider, and Ollama inside it. Formal-methods and cross-host swarm
 support are optional.
 
 Options:
-  --name NAME        VM and host name (default: kvm-agent)
+  --name NAME        Libvirt VM name and guest Linux hostname
+                     (default for new VMs only: kvm-agent)
   --user NAME        Guest login name (default: agent)
   --memory MB        Guest RAM in MiB (default: 75% of host RAM, capped at
                      32 GiB while leaving at least 2 GiB for the host)
@@ -72,6 +83,11 @@ Options:
                      GHC/GHCup, Cabal, HLS, HLint, VS Code, and the official
                      Lean and Haskell VS Code extensions inside the guest.
                      This may add several hours to first provisioning.
+  --allow-remote-editor
+                     Permit client-initiated SSH TCP and Unix-socket
+                     forwarding for tools such as VS Code Remote-SSH. The
+                     secure default denies all SSH forwarding. Agent and X11
+                     forwarding remain disabled in either mode.
   --swarm-role ROLE  Prepare this guest as a cross-host swarm "manager",
                      "worker", or "both". A manager receives a dedicated SSH
                      key; a worker receives a locked-down non-sudo account.
@@ -84,6 +100,8 @@ Options:
                      Accepts --name, --user, and --swarm-network.
   --add-journal      Install or update automatic research-journal reporting in
                      an already-provisioned VM. This does not recreate the VM.
+  --harden-existing  Reapply the current SSH security baseline and controller-
+                     key helper to an already-provisioned VM. Requires --name.
   --journal-project PATH
                      Initialize and register this guest-side Git project.
                      May be repeated. With no project, installs the journal
@@ -99,7 +117,7 @@ Options:
                      the selected model provider. Required for claude/codex.
   --journal-timezone ZONE
                      IANA timezone for report periods and timers (default:
-                     Europe/Prague).
+                     Etc/UTC).
   --resize-existing  Change RAM and/or vCPU allocation of an existing, powered
                      off VM without deleting its disk. Use with --memory and/or
                      --vcpus.
@@ -118,6 +136,9 @@ Requirements:
   * an interactive terminal and internet access
 
 Run this file as the ordinary host account, not with "sudo ./...".
+
+Operations on an existing VM require an explicit --name so a command cannot
+silently modify the wrong default VM.
 EOF
 }
 
@@ -132,6 +153,49 @@ warn() {
 die() {
   printf 'Error: %s\n' "$*" >&2
   exit 1
+}
+
+os_release_value() {
+  local wanted="$1"
+
+  awk -v wanted="$wanted" '
+    {
+      separator = index($0, "=")
+      if (!separator) next
+      key = substr($0, 1, separator - 1)
+      if (key != wanted) next
+      value = substr($0, separator + 1)
+      sub(/^"/, "", value)
+      sub(/"$/, "", value)
+      print value
+      exit
+    }
+  '
+}
+
+osinfo_short_id_available() {
+  local wanted="$1"
+
+  LC_ALL=C virt-install --osinfo list 2>/dev/null \
+    | awk -v wanted="$wanted" '
+        $1 == wanted { found = 1 }
+        END { exit(found ? 0 : 1) }
+      '
+}
+
+select_guest_osinfo() {
+  if osinfo_short_id_available "$GUEST_OSINFO_PREFERRED"; then
+    GUEST_OSINFO="$GUEST_OSINFO_PREFERRED"
+    return
+  fi
+
+  if osinfo_short_id_available "$GUEST_OSINFO_COMPATIBILITY"; then
+    GUEST_OSINFO="$GUEST_OSINFO_COMPATIBILITY"
+    warn "The host's libosinfo database does not yet list $GUEST_OSINFO_PREFERRED; using $GUEST_OSINFO_COMPATIBILITY only as compatible VM hardware metadata. The downloaded disk remains Ubuntu $GUEST_RELEASE LTS and is verified inside the guest."
+    return
+  fi
+
+  die "The host's libosinfo database lists neither $GUEST_OSINFO_PREFERRED nor $GUEST_OSINFO_COMPATIBILITY. Update the host's virtinst/osinfo-db packages and retry."
 }
 
 select_operation() {
@@ -185,6 +249,60 @@ guest_ssh_to() {
 guest_ssh() {
   [[ -n "$GUEST_IP" ]] || return 2
   guest_ssh_to "$GUEST_IP" "$SSH_COMMAND_TIMEOUT_SECONDS" "$@"
+}
+
+set_recovery_ssh_options() {
+  ssh_options=(
+    -o BatchMode=yes
+    -o ClearAllForwardings=yes
+    -o ConnectTimeout=5
+    -o ConnectionAttempts=1
+    -o ForwardAgent=no
+    -o ForwardX11=no
+    -o "HostKeyAlias=kvm-agent-${VM_NAME}"
+    -o HostKeyAlgorithms=ssh-ed25519
+    -o IdentitiesOnly=yes
+    -o IdentityAgent=none
+    -o ServerAliveCountMax=1
+    -o ServerAliveInterval=5
+    -o StrictHostKeyChecking=accept-new
+    -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS}"
+    -i "$SSH_PRIVATE_KEY"
+  )
+}
+
+install_host_helper() {
+  [[ -r "$HOST_HELPER_SOURCE" ]] || die \
+    "Host helper is missing: $HOST_HELPER_SOURCE. Use a complete repository copy."
+  install -d -m 0700 "${HOST_USER_HOME}/.local/bin"
+  install -m 0755 "$HOST_HELPER_SOURCE" \
+    "${HOST_USER_HOME}/.local/bin/kvm-agent-host"
+}
+
+install_controller_helper_in_guest() {
+  local controller_helper_b64
+
+  [[ -r "$GUEST_CONTROLLER_HELPER_SOURCE" ]] || die \
+    "Guest controller-key helper is missing: $GUEST_CONTROLLER_HELPER_SOURCE"
+  controller_helper_b64="$(base64 -w 0 "$GUEST_CONTROLLER_HELPER_SOURCE")"
+  guest_ssh_to "$GUEST_IP" 120 \
+    "printf '%s' '$controller_helper_b64' | base64 -d | sudo install -o root -g root -m 0755 /dev/stdin /usr/local/bin/kvm-agent-authorize-controller-key" \
+    || die "Could not install the controller-key helper in '$VM_NAME'."
+}
+
+apply_ssh_baseline_in_guest() {
+  local forwarding_mode="no"
+  local hardener_b64
+
+  [[ -r "$GUEST_SSH_HARDENER_SOURCE" ]] || die \
+    "Guest SSH hardener is missing: $GUEST_SSH_HARDENER_SOURCE"
+  if [[ "$ALLOW_REMOTE_EDITOR" == "yes" ]]; then
+    forwarding_mode="local"
+  fi
+  hardener_b64="$(base64 -w 0 "$GUEST_SSH_HARDENER_SOURCE")"
+  guest_ssh_to "$GUEST_IP" 120 \
+    "printf '%s' '$hardener_b64' | base64 -d | sudo install -o root -g root -m 0700 /dev/stdin /usr/local/sbin/kvm-agent-harden-ssh && sudo /usr/local/sbin/kvm-agent-harden-ssh '$forwarding_mode' '$GUEST_USER'" \
+    || die "Could not apply the SSH security baseline in '$VM_NAME'."
 }
 
 # Set GUEST_IP to a current address that belongs to this domain and accepts the
@@ -252,24 +370,16 @@ finalize_managed_guest() {
   local seed_targets
   local seed_target
   local wait_status=0
+  local guest_os_release_text
+  local guest_os_id
+  local guest_os_version
 
   [[ -r "$SSH_PRIVATE_KEY" ]] || die \
     "Recovery SSH key not found: $SSH_PRIVATE_KEY. Check --name: the default VM name is 'kvm-agent', and swarm roles do not rename the VM."
   sudo virsh --connect "$LIBVIRT_URI" dominfo "$VM_NAME" >/dev/null 2>&1 || die \
     "No libvirt VM named '$VM_NAME' exists."
 
-  ssh_options=(
-    -o BatchMode=yes
-    -o ConnectTimeout=5
-    -o ConnectionAttempts=1
-    -o ForwardAgent=no
-    -o IdentitiesOnly=yes
-    -o ServerAliveCountMax=1
-    -o ServerAliveInterval=5
-    -o StrictHostKeyChecking=accept-new
-    -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS}"
-    -i "$SSH_PRIVATE_KEY"
-  )
+  set_recovery_ssh_options
 
   # The ordinary agent bundle is allowed 90 minutes. The optional Lean,
   # Isabelle and Haskell toolchains involve several large downloads and may
@@ -299,6 +409,21 @@ finalize_managed_guest() {
     fi
     die "Finalization stopped without changing cloud-init or deleting the seed."
   fi
+
+  if ! guest_os_release_text="$(guest_ssh "cat /etc/os-release")"; then
+    die "Could not read the guest operating-system identity; cloud-init and the seed were left unchanged."
+  fi
+  guest_os_id="$(
+    printf '%s\n' "$guest_os_release_text" | os_release_value ID
+  )"
+  guest_os_version="$(
+    printf '%s\n' "$guest_os_release_text" | os_release_value VERSION_ID
+  )"
+  if [[ "$guest_os_id" != "ubuntu" \
+      || "$guest_os_version" != "$GUEST_RELEASE" ]]; then
+    die "Expected Ubuntu $GUEST_RELEASE LTS inside '$VM_NAME', but detected ${guest_os_id:-unknown} ${guest_os_version:-unknown}. Finalization stopped before changing cloud-init or deleting the seed."
+  fi
+  log "Verified guest operating system: Ubuntu $GUEST_RELEASE LTS"
 
   # Disable cloud-init while the verified guest is stable. In earlier releases
   # this happened after requesting a reboot, which allowed the asynchronous
@@ -488,23 +613,17 @@ add_swarm_to_managed_guest() {
   write_swarm_provision_script "$WORK_DIR/swarm-provision.sh"
   swarm_script_b64="$(base64 -w 0 "$WORK_DIR/swarm-provision.sh")"
 
-  ssh_options=(
-    -o BatchMode=yes
-    -o ConnectTimeout=5
-    -o ConnectionAttempts=1
-    -o ForwardAgent=no
-    -o IdentitiesOnly=yes
-    -o ServerAliveCountMax=1
-    -o ServerAliveInterval=5
-    -o StrictHostKeyChecking=accept-new
-    -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS}"
-    -i "$SSH_PRIVATE_KEY"
-  )
+  set_recovery_ssh_options
 
   log "Waiting for recovery SSH to the existing guest"
   GUEST_IP=""
   wait_for_guest_ssh 60 true || die \
     "Could not reach '$VM_NAME' through its managed recovery SSH key within five minutes."
+
+  log "Installing the secure controller-key helper"
+  install_controller_helper_in_guest
+  log "Applying the current SSH security baseline"
+  apply_ssh_baseline_in_guest
 
   log "Adding the '$SWARM_ROLE' swarm role with '$SWARM_NETWORK' networking"
   if ! guest_ssh_to "$GUEST_IP" "$SWARM_PROVISION_TIMEOUT_SECONDS" \
@@ -541,23 +660,17 @@ add_journal_to_managed_guest() {
     "${JOURNAL_PROJECTS[@]}")"
   projects_b64="$(printf '%s' "$projects_json" | base64 -w 0)"
 
-  ssh_options=(
-    -o BatchMode=yes
-    -o ConnectTimeout=5
-    -o ConnectionAttempts=1
-    -o ForwardAgent=no
-    -o IdentitiesOnly=yes
-    -o ServerAliveCountMax=1
-    -o ServerAliveInterval=5
-    -o StrictHostKeyChecking=accept-new
-    -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS}"
-    -i "$SSH_PRIVATE_KEY"
-  )
+  set_recovery_ssh_options
 
   log "Waiting for recovery SSH to the existing guest"
   GUEST_IP=""
   wait_for_guest_ssh 60 true || die \
     "Could not reach '$VM_NAME' through its managed recovery SSH key within five minutes."
+
+  log "Installing the secure controller-key helper"
+  install_controller_helper_in_guest
+  log "Applying the current SSH security baseline"
+  apply_ssh_baseline_in_guest
 
   log "Installing automatic research journals with '$JOURNAL_BACKEND' reporting"
   if ! guest_ssh_to "$GUEST_IP" "$JOURNAL_PROVISION_TIMEOUT_SECONDS" \
@@ -574,6 +687,25 @@ add_journal_to_managed_guest() {
   guest_ssh \
     "cat /var/lib/kvm-agent/journal-profile && kvm-agent-journal status" || die \
     "Journal installation completed, but its status could not be read."
+}
+
+harden_managed_guest() {
+  [[ -r "$SSH_PRIVATE_KEY" ]] || die \
+    "Recovery SSH key not found: $SSH_PRIVATE_KEY. Check the explicit --name value."
+  sudo virsh --connect "$LIBVIRT_URI" dominfo "$VM_NAME" >/dev/null 2>&1 || die \
+    "No libvirt VM named '$VM_NAME' exists."
+
+  set_recovery_ssh_options
+
+  log "Waiting for recovery SSH to the existing guest"
+  GUEST_IP=""
+  wait_for_guest_ssh 60 true || die \
+    "Could not reach '$VM_NAME' through its managed recovery SSH key within five minutes."
+
+  log "Installing the secure controller-key helper"
+  install_controller_helper_in_guest
+  log "Applying the current SSH security baseline"
+  apply_ssh_baseline_in_guest
 }
 
 resize_managed_guest() {
@@ -792,11 +924,12 @@ case "$network" in
     if ! ufw show added | grep -Fq 'ufw allow out on tailscale0 to 100.64.0.0/10'; then
       ufw insert 1 allow out on tailscale0 to 100.64.0.0/10 >/dev/null
     fi
-    if [[ "$role" == worker || "$role" == both ]]; then
-      if ! ufw show added | grep -Fq 'ufw allow in on tailscale0 from 100.64.0.0/10 to any port 22 proto tcp'; then
-        ufw insert 1 allow in on tailscale0 from 100.64.0.0/10 \
-          to any port 22 proto tcp >/dev/null
-      fi
+    # Managers need inbound SSH from the trusted controller; workers need it
+    # from their manager. Tailscale grants select the permitted peer identity,
+    # while UFW limits the exposed service to TCP/22 on tailscale0.
+    if ! ufw show added | grep -Fq 'ufw allow in on tailscale0 from 100.64.0.0/10 to any port 22 proto tcp'; then
+      ufw insert 1 allow in on tailscale0 from 100.64.0.0/10 \
+        to any port 22 proto tcp >/dev/null
     fi
     ;;
   wireguard)
@@ -807,10 +940,8 @@ case "$network" in
     if ! ufw show added | grep -Fq 'ufw allow out on wg0'; then
       ufw insert 1 allow out on wg0 >/dev/null
     fi
-    if [[ "$role" == worker || "$role" == both ]]; then
-      if ! ufw show added | grep -Fq 'ufw allow in on wg0 to any port 22 proto tcp'; then
-        ufw insert 1 allow in on wg0 to any port 22 proto tcp >/dev/null
-      fi
+    if ! ufw show added | grep -Fq 'ufw allow in on wg0 to any port 22 proto tcp'; then
+      ufw insert 1 allow in on wg0 to any port 22 proto tcp >/dev/null
     fi
     ;;
 esac
@@ -1335,6 +1466,24 @@ if [[ "$network" == tailscale ]]; then
   cat > /usr/local/bin/kvm-agent-swarm-tailscale-up <<'TAILSCALE_UP'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+
+usage() {
+  local status="${1:-2}"
+  cat >&2 <<'EOF'
+Usage:
+  kvm-agent-swarm-tailscale-up --group GROUP [--name DEVICE_NAME]
+  kvm-agent-swarm-tailscale-up --name DEVICE_NAME --tag TAG
+
+Recommended example (the word "research-a" is only an example group name):
+  kvm-agent-swarm-tailscale-up --group research-a
+
+--group derives both a unique device name and one composite role tag. Define
+that tag and its grants in the Tailscale policy before running this command.
+See docs/swarm.md in the KVM-Agent repository.
+EOF
+  exit "$status"
+}
+
 marker=/var/lib/kvm-agent/swarm-profile
 roles="$(sed -n 's/^roles=//p' "$marker" | head -n 1)"
 case "$roles" in
@@ -1342,20 +1491,76 @@ case "$roles" in
   worker) suffix=worker ;;
   *) suffix=swarm ;;
 esac
-suggested="$(hostname)-${suffix}"
-device_name="${1:-$suggested}"
+
+group_name=""
+device_name=""
+device_tag=""
+while (($# > 0)); do
+  case "$1" in
+    --group)
+      (($# >= 2)) || usage
+      group_name="$2"
+      shift 2
+      ;;
+    --name)
+      (($# >= 2)) || usage
+      device_name="$2"
+      shift 2
+      ;;
+    --tag)
+      (($# >= 2)) || usage
+      device_tag="$2"
+      shift 2
+      ;;
+    -h|--help) usage 0 ;;
+    *) usage ;;
+  esac
+done
+
+if [[ -n "$group_name" ]]; then
+  [[ -z "$device_tag" ]] || {
+    echo '--tag cannot be combined with --group; the group derives its one composite tag.' >&2
+    exit 2
+  }
+  [[ "$group_name" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || {
+    echo 'GROUP must start with a lowercase letter and use only a-z, 0-9, and hyphens.' >&2
+    exit 2
+  }
+  device_name="${device_name:-${group_name}-${suffix}}"
+  device_tag="${device_tag:-tag:swarm-${group_name}-${suffix}}"
+fi
 [[ "$device_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$ ]] || {
-  echo 'Tailscale device name must contain only letters, digits, and hyphens.' >&2
+  echo 'Use --name with a Tailscale name containing only letters, digits, and hyphens.' >&2
   exit 2
 }
+[[ "$device_tag" =~ ^tag:[a-z][a-z0-9-]{0,62}$ ]] || {
+  echo 'Use --tag tag:NAME, or use --group to derive a composite tag.' >&2
+  exit 2
+}
+
 echo "Joining Tailscale as '$device_name'."
+echo "Requesting the device identity '$device_tag'."
 echo 'The physical host is not joined; only this guest VM is enrolled.'
 sudo tailscale up \
+  --reset \
   --hostname="$device_name" \
+  --advertise-tags="$device_tag" \
   --accept-routes=false \
+  --exit-node= \
   --ssh=false
+
+actual_tags="$(
+  tailscale status --json |
+    python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["Self"].get("Tags", [])))'
+)"
+grep -Fxq -- "$device_tag" <<< "$actual_tags" || {
+  echo "Tailscale connected, but the requested tag is absent: $device_tag" >&2
+  echo 'Stop here and correct tagOwners/device tagging before relying on isolation.' >&2
+  exit 1
+}
 printf '\nTailscale address:\n'
 tailscale ip -4
+printf '\nVerified device tag:\n%s\n' "$device_tag"
 printf '\nPeer status:\n'
 tailscale status
 TAILSCALE_UP
@@ -1370,6 +1575,14 @@ cat /var/lib/kvm-agent/swarm-profile
 if command -v tailscale >/dev/null 2>&1; then
   echo
   tailscale status 2>/dev/null || true
+  tags="$(tailscale status --json 2>/dev/null | python3 -c \
+    'import json,sys; print(" ".join(json.load(sys.stdin)["Self"].get("Tags", [])))' \
+    2>/dev/null || true)"
+  if [[ -n "$tags" ]]; then
+    printf 'Device tags: %s\n' "$tags"
+  else
+    echo 'SECURITY WARNING: this Tailscale device is untagged; subgroup isolation is not established.'
+  fi
 fi
 if command -v wg >/dev/null 2>&1; then
   echo
@@ -1398,6 +1611,7 @@ while (($# > 0)); do
     --name)
       (($# >= 2)) || die "--name requires a value."
       VM_NAME="$2"
+      VM_NAME_OPTION_SET="yes"
       shift 2
       ;;
     --user)
@@ -1432,6 +1646,10 @@ while (($# > 0)); do
       WITH_FORMAL_METHODS="yes"
       shift
       ;;
+    --allow-remote-editor)
+      ALLOW_REMOTE_EDITOR="yes"
+      shift
+      ;;
     --swarm-role)
       (($# >= 2)) || die "--swarm-role requires a value."
       [[ "$ADD_SWARM_ROLE_SET" == "no" ]] || die \
@@ -1458,6 +1676,10 @@ while (($# > 0)); do
       ;;
     --add-journal)
       select_operation "add-journal" "--add-journal"
+      shift
+      ;;
+    --harden-existing)
+      select_operation "harden" "--harden-existing"
       shift
       ;;
     --journal-project)
@@ -1524,7 +1746,7 @@ esac
 if [[ "$OPERATION" != "add-journal" ]]; then
   [[ ${#JOURNAL_PROJECTS[@]} -eq 0 \
       && "$JOURNAL_BACKEND" == "evidence" \
-      && "$JOURNAL_TIMEZONE" == "Europe/Prague" \
+      && "$JOURNAL_TIMEZONE" == "Etc/UTC" \
       && "$JOURNAL_ALLOW_REMOTE_REPORTING" == "no" ]] || die \
     "--journal-project, --journal-backend, --journal-allow-remote-reporting, and --journal-timezone require --add-journal."
 fi
@@ -1535,6 +1757,20 @@ fi
 if [[ "$JOURNAL_BACKEND" != "evidence" \
     && "$JOURNAL_ALLOW_REMOTE_REPORTING" != "yes" ]]; then
   die "--journal-backend $JOURNAL_BACKEND sends project metadata to a model provider; add --journal-allow-remote-reporting to consent explicitly."
+fi
+if [[ "$OPERATION" != "create" && "$VM_NAME_OPTION_SET" != "yes" ]]; then
+  die "Operations on an existing VM require --name ACTUAL_LIBVIRT_VM_NAME. List names with: sudo virsh --connect qemu:///system list --all --name"
+fi
+if [[ "$REPLACE_EXISTING" == "yes" && "$VM_NAME_OPTION_SET" != "yes" ]]; then
+  die "--replace-existing requires an explicit --name ACTUAL_LIBVIRT_VM_NAME."
+fi
+if [[ "$ALLOW_REMOTE_EDITOR" == "yes" \
+    && "$OPERATION" != "create" \
+    && "$OPERATION" != "harden" ]]; then
+  die "--allow-remote-editor is accepted only when creating a VM or with --harden-existing."
+fi
+if [[ "$ALLOW_REMOTE_EDITOR" == "yes" ]]; then
+  SSH_FORWARDING_MODE="local"
 fi
 
 [[ $EUID -ne 0 ]] || die \
@@ -1557,6 +1793,7 @@ if [[ "$OPERATION" == "finalize" ]]; then
       && "$WAIT_FOR_GUEST" == "yes" \
       && "$RESTRICT_PRIVATE_NETWORKS" == "yes" \
       && "$WITH_FORMAL_METHODS" == "no" \
+      && "$ALLOW_REMOTE_EDITOR" == "no" \
       && "$SWARM_ROLE" == "none" \
       && -z "$SWARM_NETWORK" ]] || die \
     "--finalize-existing accepts only --name and --user."
@@ -1567,7 +1804,8 @@ if [[ "$OPERATION" == "add-swarm" ]]; then
       && "$DISK_GB" == "$DEFAULT_DISK_GB" \
       && "$WAIT_FOR_GUEST" == "yes" \
       && "$RESTRICT_PRIVATE_NETWORKS" == "yes" \
-      && "$WITH_FORMAL_METHODS" == "no" ]] || die \
+      && "$WITH_FORMAL_METHODS" == "no" \
+      && "$ALLOW_REMOTE_EDITOR" == "no" ]] || die \
     "--add-swarm accepts only --name, --user, and --swarm-network."
 fi
 if [[ "$OPERATION" == "add-journal" ]]; then
@@ -1577,9 +1815,21 @@ if [[ "$OPERATION" == "add-journal" ]]; then
       && "$WAIT_FOR_GUEST" == "yes" \
       && "$RESTRICT_PRIVATE_NETWORKS" == "yes" \
       && "$WITH_FORMAL_METHODS" == "no" \
+      && "$ALLOW_REMOTE_EDITOR" == "no" \
       && "$SWARM_ROLE" == "none" \
       && -z "$SWARM_NETWORK" ]] || die \
     "--add-journal accepts only --name, --user, and journal options."
+fi
+if [[ "$OPERATION" == "harden" ]]; then
+  [[ "$REPLACE_EXISTING" == "no" \
+      && -z "$RAM_MB" && -z "$VCPUS" \
+      && "$DISK_GB" == "$DEFAULT_DISK_GB" \
+      && "$WAIT_FOR_GUEST" == "yes" \
+      && "$RESTRICT_PRIVATE_NETWORKS" == "yes" \
+      && "$WITH_FORMAL_METHODS" == "no" \
+      && "$SWARM_ROLE" == "none" \
+      && -z "$SWARM_NETWORK" ]] || die \
+    "--harden-existing accepts only --name, --user, and --allow-remote-editor."
 fi
 if [[ "$OPERATION" == "resize" ]]; then
   [[ "$REPLACE_EXISTING" == "no" \
@@ -1587,6 +1837,7 @@ if [[ "$OPERATION" == "resize" ]]; then
       && "$WAIT_FOR_GUEST" == "yes" \
       && "$RESTRICT_PRIVATE_NETWORKS" == "yes" \
       && "$WITH_FORMAL_METHODS" == "no" \
+      && "$ALLOW_REMOTE_EDITOR" == "no" \
       && "$SWARM_ROLE" == "none" \
       && -z "$SWARM_NETWORK" ]] || die \
     "--resize-existing accepts only --name, --memory, and/or --vcpus."
@@ -1596,9 +1847,9 @@ fi
 positive_integer "$DISK_GB" || die "--disk must be a positive integer."
 ((DISK_GB >= 50)) || die "Use at least 50 GiB for the graphical guest."
 
-[[ -r /etc/os-release ]] || die "Cannot identify the host operating system."
-# shellcheck disable=SC1091
-source /etc/os-release
+[[ -r "$HOST_OS_RELEASE" ]] || die "Cannot identify the host operating system."
+# shellcheck disable=SC1090
+source "$HOST_OS_RELEASE"
 [[ "${ID:-}" == "ubuntu" ]] || die "This script supports Ubuntu hosts only."
 case "${VERSION_ID:-}" in
   24.04|26.04) ;;
@@ -1621,6 +1872,8 @@ readonly PROVISIONING_MODE_FILE="${KEY_DIR}/provisioning-mode"
 ssh_options=()
 GUEST_IP=""
 
+install_host_helper
+
 if [[ "$OPERATION" == "finalize" ]]; then
   if [[ -r "$PROVISIONING_MODE_FILE" ]] \
       && grep -Fxq 'formal-methods=yes' "$PROVISIONING_MODE_FILE"; then
@@ -1632,6 +1885,19 @@ if [[ "$OPERATION" == "finalize" ]]; then
   log "KVM-Agent finalization completed"
   printf 'Guest address: %s\n' "$GUEST_IP"
   printf 'Cloud-init is disabled and the provisioning seed is absent.\n'
+  exit 0
+fi
+
+if [[ "$OPERATION" == "harden" ]]; then
+  log "Authorising SSH hardening of the existing guest"
+  sudo -v
+  if [[ "$ALLOW_REMOTE_EDITOR" == "yes" ]]; then
+    warn "Remote-editor mode permits client-initiated SSH port forwarding. Agent forwarding and X11 forwarding remain disabled."
+  fi
+  harden_managed_guest
+  log "KVM-Agent SSH hardening completed"
+  printf 'Guest address: %s\n' "$GUEST_IP"
+  printf 'Secure macOS setup: macos/setup-secure-access.sh TAILSCALE_NAME\n'
   exit 0
 fi
 
@@ -1648,7 +1914,8 @@ if [[ "$OPERATION" == "add-swarm" ]]; then
   printf 'Guest address: %s\n' "$GUEST_IP"
   printf '\nNext steps inside the normal sudo-capable guest account:\n'
   if [[ "$SWARM_NETWORK" == "tailscale" ]]; then
-    printf '  kvm-agent-swarm-tailscale-up [DISTINCT-DEVICE-NAME]\n'
+    printf '  define the composite tag and grants in Tailscale first\n'
+    printf '  kvm-agent-swarm-tailscale-up --group YOUR_SWARM_GROUP\n'
   else
     printf '  create and review /etc/wireguard/wg0.conf\n'
   fi
@@ -1756,6 +2023,11 @@ if [[ "$SWARM_ROLE" != "none" ]]; then
 else
   printf 'Swarm profile:  not requested (see docs/swarm.md)\n'
 fi
+if [[ "$SSH_FORWARDING_MODE" == "local" ]]; then
+  printf 'SSH forwarding: client-initiated local forwarding enabled for remote editors\n'
+else
+  printf 'SSH forwarding: denied (secure default)\n'
+fi
 
 log "Authorising host setup"
 sudo -v
@@ -1776,7 +2048,11 @@ sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
   curl \
   gpgv \
   openssl \
-  openssh-client
+  openssh-client \
+  rsync
+
+select_guest_osinfo
+printf 'VM OS metadata: %s\n' "$GUEST_OSINFO"
 
 sudo systemctl enable --now libvirtd.service
 
@@ -1947,7 +2223,10 @@ fi
 chmod 0600 "$SSH_PRIVATE_KEY"
 chmod 0644 "$SSH_PUBLIC_KEY_FILE"
 {
+  printf 'guest-user=%s\n' "$GUEST_USER"
+  printf 'guest-release=%s\n' "$GUEST_RELEASE"
   printf 'formal-methods=%s\n' "$WITH_FORMAL_METHODS"
+  printf 'ssh-port-forwarding=%s\n' "$SSH_FORWARDING_MODE"
   printf 'swarm-role=%s\n' "$SWARM_ROLE"
   printf 'swarm-network=%s\n' "${SWARM_NETWORK:-none}"
 } > "$PROVISIONING_MODE_FILE"
@@ -2004,6 +2283,7 @@ with_formal_methods="${4:?formal-methods selection is required}"
 requested_disk_gib="${5:?requested disk size is required}"
 swarm_role="${6:?swarm role is required}"
 swarm_network="${7:?swarm network is required}"
+expected_guest_release="${8:?expected guest release is required}"
 guest_home="$(getent passwd "$guest_user" | awk -F: '{print $6}')"
 guest_group="$(id -gn "$guest_user")"
 guest_path="${guest_home}/.elan/bin:${guest_home}/.ghcup/bin:${guest_home}/.local/bin:${guest_home}/.opencode/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -2045,6 +2325,37 @@ record_provisioning_failure() {
   exit "$exit_status"
 }
 trap record_provisioning_failure EXIT
+
+os_release_value() {
+  local wanted="$1"
+
+  awk -v wanted="$wanted" '
+    {
+      separator = index($0, "=")
+      if (!separator) next
+      key = substr($0, 1, separator - 1)
+      if (key != wanted) next
+      value = substr($0, separator + 1)
+      sub(/^"/, "", value)
+      sub(/"$/, "", value)
+      print value
+      exit
+    }
+  ' /etc/os-release
+}
+
+[[ "$expected_guest_release" =~ ^[0-9]{2}\.[0-9]{2}$ ]] || {
+  echo "Invalid expected guest release: $expected_guest_release" >&2
+  exit 1
+}
+actual_guest_os_id="$(os_release_value ID)"
+actual_guest_release="$(os_release_value VERSION_ID)"
+if [[ "$actual_guest_os_id" != "ubuntu" \
+    || "$actual_guest_release" != "$expected_guest_release" ]]; then
+  echo "Expected Ubuntu ${expected_guest_release} LTS, but this image reports ${actual_guest_os_id:-unknown} ${actual_guest_release:-unknown}. Refusing to provision the wrong guest release." >&2
+  exit 1
+fi
+echo "Verified guest operating system: Ubuntu ${actual_guest_release} LTS."
 
 root_filesystem_bytes() {
   LC_ALL=C df -B1 --output=size / | awk 'NR == 2 { print $1 }'
@@ -2509,6 +2820,7 @@ rm -f -- "$emergency_reserve"
 
 {
   printf 'Provisioned: %s\n' "$(date --utc --iso-8601=seconds)"
+  printf 'Guest OS: Ubuntu %s LTS\n' "$actual_guest_release"
   if [[ "$with_formal_methods" == "yes" ]]; then
     printf '\nFormal methods and editor:\n'
     as_guest code --version
@@ -2547,6 +2859,11 @@ GUEST_SCRIPT
 chmod 0700 "$WORK_DIR/guest-provision.sh"
 
 GUEST_PROVISION_B64="$(base64 -w 0 "$WORK_DIR/guest-provision.sh")"
+[[ -r "$GUEST_CONTROLLER_HELPER_SOURCE" \
+    && -r "$GUEST_SSH_HARDENER_SOURCE" ]] || die \
+  "Guest security helper files are missing. Use a complete repository copy."
+GUEST_CONTROLLER_HELPER_B64="$(base64 -w 0 "$GUEST_CONTROLLER_HELPER_SOURCE")"
+GUEST_SSH_HARDENER_B64="$(base64 -w 0 "$GUEST_SSH_HARDENER_SOURCE")"
 
 cat > "$WORK_DIR/user-data" <<EOF
 #cloud-config
@@ -2575,14 +2892,40 @@ growpart:
 resize_rootfs: true
 
 write_files:
-  - path: /etc/ssh/sshd_config.d/90-kvm-agent.conf
+  # OpenSSH uses the first value it reads for most settings. The 00 prefix is
+  # intentional: this baseline must precede cloud-image and package drop-ins.
+  - path: /etc/ssh/sshd_config.d/00-kvm-agent.conf
     owner: root:root
     permissions: "0644"
     content: |
       PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitEmptyPasswords no
       PermitRootLogin no
+      PubkeyAuthentication yes
+      AuthenticationMethods publickey
       AllowAgentForwarding no
+      AllowTcpForwarding ${SSH_FORWARDING_MODE}
+      AllowStreamLocalForwarding ${SSH_FORWARDING_MODE}
+      GatewayPorts no
       X11Forwarding no
+      PermitTunnel no
+      PermitUserEnvironment no
+      PermitUserRC no
+      LoginGraceTime 30
+      MaxAuthTries 3
+
+  - path: /usr/local/bin/kvm-agent-authorize-controller-key
+    owner: root:root
+    permissions: "0755"
+    encoding: b64
+    content: ${GUEST_CONTROLLER_HELPER_B64}
+
+  - path: /usr/local/sbin/kvm-agent-harden-ssh
+    owner: root:root
+    permissions: "0700"
+    encoding: b64
+    content: ${GUEST_SSH_HARDENER_B64}
 
   - path: /usr/local/sbin/kvm-agent-provision
     owner: root:root
@@ -2597,7 +2940,8 @@ write_files:
     content: ${SWARM_PROVISION_B64}
 
 runcmd:
-  - ["/usr/local/sbin/kvm-agent-provision", "${GUEST_USER}", "${RESTRICT_PRIVATE_NETWORKS}", "${GATEWAY_ADDRESS}", "${WITH_FORMAL_METHODS}", "${DISK_GB}", "${SWARM_ROLE}", "${SWARM_NETWORK:-none}"]
+  - ["/usr/local/sbin/kvm-agent-harden-ssh", "${SSH_FORWARDING_MODE}", "${GUEST_USER}"]
+  - ["/usr/local/sbin/kvm-agent-provision", "${GUEST_USER}", "${RESTRICT_PRIVATE_NETWORKS}", "${GATEWAY_ADDRESS}", "${WITH_FORMAL_METHODS}", "${DISK_GB}", "${SWARM_ROLE}", "${SWARM_NETWORK:-none}", "${GUEST_RELEASE}"]
 
 final_message: "KVM-Agent cloud-init finished after \$UPTIME seconds; verify cloud-init status."
 EOF
@@ -2648,7 +2992,7 @@ sudo virt-install \
   --memory "$RAM_MB" \
   --vcpus "$VCPUS" \
   --cpu host-model \
-  --osinfo ubuntu24.04 \
+  --osinfo "$GUEST_OSINFO" \
   --import \
   --disk "path=${VM_DISK},format=qcow2,bus=virtio,cache=none,discard=unmap" \
   --disk "path=${SEED_IMAGE},device=cdrom,readonly=on" \
@@ -2661,8 +3005,6 @@ sudo virt-install \
   --noautoconsole
 
 print_next_steps() {
-  local guest_ip="${1:-VM_ADDRESS}"
-
   printf '\nThe VM is managed by system libvirt and is visible in virt-manager.\n'
   printf 'If this script added your host account to the libvirt group for\n'
   printf 'the first time, log out of Ubuntu and back in once before opening\n'
@@ -2671,9 +3013,10 @@ print_next_steps() {
   printf '  virt-manager --connect %q\n\n' "$LIBVIRT_URI"
   printf 'Recovery SSH key:\n'
   printf '  %s\n\n' "$SSH_PRIVATE_KEY"
-  printf 'Recovery SSH command:\n'
-  printf '  ssh -o IdentitiesOnly=yes -i %q %q@%q\n\n' \
-    "$SSH_PRIVATE_KEY" "$GUEST_USER" "$guest_ip"
+  printf 'Safe host-side SSH and transfer helper:\n'
+  printf '  kvm-agent-host ssh %q\n' "$VM_NAME"
+  printf '  kvm-agent-host push %q ./my-project Work/\n' "$VM_NAME"
+  printf '  kvm-agent-host pull %q Work/result.patch\n\n' "$VM_NAME"
   printf 'Inside the desktop terminal, start a tool with:\n'
   printf '  codex    claude    opencode    aider    ollama\n'
   if [[ "$WITH_FORMAL_METHODS" == "yes" ]]; then
@@ -2687,7 +3030,8 @@ print_next_steps() {
     printf '  kvm-agent-swarm-status\n'
     if [[ "$SWARM_NETWORK" == "tailscale" ]]; then
       printf 'Join the guest to the intended tailnet manually with:\n'
-      printf '  kvm-agent-swarm-tailscale-up [DEVICE-NAME]\n'
+      printf '  define the composite tag and grants in Tailscale first\n'
+      printf '  kvm-agent-swarm-tailscale-up --group YOUR_SWARM_GROUP\n'
     else
       printf 'Create and review /etc/wireguard/wg0.conf before enabling wg-quick@wg0.\n'
     fi
@@ -2722,4 +3066,4 @@ fi
 finalize_managed_guest
 
 log "KVM-Agent setup completed"
-print_next_steps "$GUEST_IP"
+print_next_steps

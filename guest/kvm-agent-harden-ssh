@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+[[ $EUID -eq 0 ]] || {
+  echo 'Run kvm-agent-harden-ssh through sudo.' >&2
+  exit 1
+}
+
+forwarding_mode="${1:-no}"
+case "$forwarding_mode" in
+  no|local) ;;
+  *)
+    echo "Usage: sudo kvm-agent-harden-ssh [no|local] [LOGIN_USER]" >&2
+    exit 2
+    ;;
+esac
+login_user="${2:-${SUDO_USER:-agent}}"
+[[ $# -le 2 && "$login_user" =~ ^[a-z_][a-z0-9_-]{0,31}$ \
+    && "$login_user" != root ]] || {
+  echo "LOGIN_USER must be one non-root lowercase Linux account name." >&2
+  exit 2
+}
+
+destination=/etc/ssh/sshd_config.d/00-kvm-agent.conf
+staging="$(mktemp /etc/ssh/sshd_config.d/.00-kvm-agent.XXXXXXXX)"
+backup=""
+trap 'rm -f -- "$staging" "${backup:-}"' EXIT
+
+restore_previous() {
+  if [[ -n "$backup" ]]; then
+    install -o root -g root -m 0644 "$backup" "$destination"
+  else
+    rm -f -- "$destination"
+  fi
+}
+
+validate_baseline() {
+  local actual
+  local effective
+  local key
+  local validation_host
+  local value
+
+  sshd -t || return 1
+  validation_host="$(hostname -f 2>/dev/null || hostname 2>/dev/null || true)"
+  if [[ ! "$validation_host" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$ ]]; then
+    validation_host=localhost
+  fi
+  effective="$(sshd -T -C \
+    "user=${login_user},host=${validation_host},addr=127.0.0.1,laddr=127.0.0.1,lport=22")" \
+    || return 1
+  while read -r key value; do
+    actual="$(awk -v wanted="$key" '
+      $1 == wanted {
+        $1 = ""
+        sub(/^ /, "")
+        print
+        exit
+      }
+    ' <<< "$effective")"
+    if [[ "$actual" != "$value" ]]; then
+      printf 'Effective SSH setting is %s=%q; expected %q.\n' \
+        "$key" "$actual" "$value" >&2
+      return 1
+    fi
+  done <<EOF
+passwordauthentication no
+kbdinteractiveauthentication no
+permitemptypasswords no
+permitrootlogin no
+pubkeyauthentication yes
+authenticationmethods publickey
+allowagentforwarding no
+allowtcpforwarding ${forwarding_mode}
+allowstreamlocalforwarding ${forwarding_mode}
+gatewayports no
+x11forwarding no
+permittunnel no
+permituserenvironment no
+permituserrc no
+logingracetime 30
+maxauthtries 3
+EOF
+}
+
+cat > "$staging" <<EOF
+# Managed by KVM-Agent. Reapply with setup-kvm-agent.sh --harden-existing.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+AllowAgentForwarding no
+AllowTcpForwarding ${forwarding_mode}
+AllowStreamLocalForwarding ${forwarding_mode}
+GatewayPorts no
+X11Forwarding no
+PermitTunnel no
+PermitUserEnvironment no
+PermitUserRC no
+LoginGraceTime 30
+MaxAuthTries 3
+EOF
+chown root:root "$staging"
+chmod 0644 "$staging"
+
+if [[ -e "$destination" ]]; then
+  [[ -f "$destination" && ! -L "$destination" ]] || {
+    echo "Refusing to replace a non-regular SSH configuration: $destination" >&2
+    exit 1
+  }
+  backup="$(mktemp /etc/ssh/sshd_config.d/.00-kvm-agent.backup.XXXXXXXX)"
+  cp --preserve=mode,ownership,timestamps -- "$destination" "$backup"
+fi
+
+install -o root -g root -m 0644 "$staging" "$destination"
+if ! validate_baseline; then
+  echo 'The hardened SSH configuration is not effective; restoring the previous file.' >&2
+  restore_previous
+  sshd -t || {
+    echo 'The restored SSH configuration also fails validation. Inspect sshd_config manually.' >&2
+    exit 1
+  }
+  exit 1
+fi
+
+if ! systemctl reload ssh.service; then
+  echo 'SSH reload failed; restoring the previous configuration.' >&2
+  restore_previous
+  sshd -t && systemctl reload ssh.service || {
+    echo 'Could not reload the restored SSH configuration. Keep the local console open and inspect ssh.service.' >&2
+    exit 1
+  }
+  exit 1
+fi
+printf 'Applied KVM-Agent SSH baseline (port forwarding: %s).\n' "$forwarding_mode"
+printf 'Verified effective settings for login account: %s.\n' "$login_user"
+printf 'Agent forwarding, X11 forwarding, tunnels, password login, and root login are disabled.\n'

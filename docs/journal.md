@@ -17,14 +17,15 @@ and must still have the recovery key created by KVM-Agent.
   --add-journal \
   --name kvm-agent \
   --user agent \
-  --journal-project /home/agent/PSL_Neural \
-  --journal-project /home/agent/Another_Project \
-  --journal-timezone Europe/Prague
+  --journal-project /home/agent/YOUR_PROJECT_A \
+  --journal-project /home/agent/YOUR_PROJECT_B
 ```
 
 This default is the recommended mode: scheduled reports are produced
 deterministically inside the guest and no journal data is sent to a model
-provider.
+provider. `YOUR_PROJECT_A` and `YOUR_PROJECT_B` are placeholders. The default
+timezone is `Etc/UTC`; add `--journal-timezone YOUR_IANA_TIMEZONE` only when a
+different local reporting boundary is useful.
 
 `--journal-project` is a path **inside the guest**, not on the host, and may be
 repeated. Each target must already exist and be a Git worktree. The operation
@@ -37,8 +38,8 @@ To install the commands and timers before choosing repositories, omit every
 `--journal-project`. Later, inside the guest, run:
 
 ```bash
-kvm-agent-journal init /home/agent/Project
-sudo kvm-agent-journal register /home/agent/Project
+kvm-agent-journal init /home/agent/YOUR_PROJECT
+sudo kvm-agent-journal register /home/agent/YOUR_PROJECT
 ```
 
 `init` creates or updates the project files. The separate root-only `register`
@@ -146,7 +147,7 @@ Manual generation is also available:
 
 ```bash
 kvm-agent-journal report daily --all
-kvm-agent-journal report weekly --project /home/agent/PSL_Neural
+kvm-agent-journal report weekly --project /home/agent/YOUR_PROJECT
 ```
 
 ## Evidence-only reports and optional remote enrichment
@@ -164,11 +165,14 @@ named Claude or Codex backend. It requires a separate consent flag:
   --add-journal \
   --name kvm-agent \
   --user agent \
-  --journal-project /home/agent/PSL_Neural \
+  --journal-project /home/agent/YOUR_PROJECT \
   --journal-backend claude \
   --journal-allow-remote-reporting \
-  --journal-timezone Europe/Prague
+  --journal-timezone YOUR_IANA_TIMEZONE
 ```
+
+Both `YOUR_PROJECT` and `YOUR_IANA_TIMEZONE` are placeholders; for example,
+an actual timezone value could be `Europe/Prague`.
 
 That flag means that bounded versions of the following data may leave the VM:
 

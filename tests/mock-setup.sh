@@ -26,6 +26,8 @@ cat > "$TEMP_DIR/os-release" <<'EOF'
 ID=ubuntu
 VERSION_ID=24.04
 EOF
+# Deliberately emulate a supported Ubuntu 24.04 host. The guest image selected
+# by the setup script must still be Ubuntu 26.04.
 
 # Fixed host memory so the resource checks behave identically on any machine
 # that runs the test suite.
@@ -35,6 +37,8 @@ EOF
 
 cp "$REPO_DIR/setup-kvm-agent.sh" "$TEMP_DIR/setup-under-test.sh"
 cp -R "$REPO_DIR/journal" "$TEMP_DIR/journal"
+cp -R "$REPO_DIR/host" "$TEMP_DIR/host"
+cp -R "$REPO_DIR/guest" "$TEMP_DIR/guest"
 cat > "$TEMP_DIR/remove-kvm-agent.sh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" > "$MOCK_STATE/remove-arguments"
@@ -55,7 +59,7 @@ chmod 0755 "$TEMP_DIR/remove-kvm-agent.sh"
 # The single-quoted sed expression must match the literal shell variable name.
 # shellcheck disable=SC2016
 sed -i \
-  -e "s#/etc/os-release#${TEMP_DIR}/os-release#g" \
+  -e "s#readonly HOST_OS_RELEASE=\"/etc/os-release\"#readonly HOST_OS_RELEASE=\"${TEMP_DIR}/os-release\"#" \
   -e "s#/dev/kvm#${TEMP_DIR}/dev-kvm#g" \
   -e "s#/proc/meminfo#${TEMP_DIR}/meminfo#g" \
   -e "s#/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg#${TEMP_DIR}/keyrings/ubuntu-cloudimage-keyring.gpg#g" \
@@ -141,12 +145,12 @@ done
 case "${url##*/}" in
   SHA256SUMS)
     hash="$(sha256sum "$MOCK_CLOUD_IMAGE" | awk '{print $1}')"
-    printf '%s  ubuntu-24.04-server-cloudimg-amd64.img\n' "$hash" > "$output"
+    printf '%s  ubuntu-26.04-server-cloudimg-amd64.img\n' "$hash" > "$output"
     ;;
   SHA256SUMS.gpg)
     printf 'mock detached signature\n' > "$output"
     ;;
-  ubuntu-24.04-server-cloudimg-amd64.img)
+  ubuntu-26.04-server-cloudimg-amd64.img)
     cp "$MOCK_CLOUD_IMAGE" "$output"
     ;;
   *)
@@ -295,6 +299,14 @@ EOF
 
 cat > "$TEMP_DIR/bin/virt-install" <<'EOF'
 #!/usr/bin/env bash
+if [[ "$*" == "--osinfo list" ]]; then
+  printf '%s\n' ubuntu24.04
+  if [[ "${MOCK_OSINFO_26_AVAILABLE:-yes}" == "yes" ]]; then
+    printf '%s\n' ubuntu26.04
+  fi
+  exit 0
+fi
+printf '%s\n' "$*" > "$MOCK_STATE/virt-install-arguments"
 touch "$MOCK_STATE/domain-defined"
 EOF
 
@@ -331,6 +343,7 @@ cat > "$TEMP_DIR/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 all_arguments="$*"
 remote_command="${@: -1}"
+printf '%s\n' "$all_arguments" >> "$MOCK_STATE/ssh-calls"
 if [[ "$all_arguments" == *"/var/lib/kvm-agent/provisioning-failed"* \
     && -f "$MOCK_STATE/provisioning-failed" ]]; then
   exit 42
@@ -397,6 +410,14 @@ if [[ "$remote_command" == \
     "sudo test -f /etc/cloud/cloud-init.disabled" ]]; then
   [[ -f "$MOCK_STATE/cloud-init-disabled" ]]
   exit
+fi
+if [[ "$remote_command" == "cat /etc/os-release" ]]; then
+  cat <<OUTPUT
+ID=ubuntu
+VERSION_ID="${MOCK_GUEST_RELEASE:-26.04}"
+PRETTY_NAME="Ubuntu ${MOCK_GUEST_RELEASE:-26.04} LTS"
+OUTPUT
+  exit 0
 fi
 if [[ "$all_arguments" == *"sudo cloud-init clean --logs"* ]]; then
   [[ -f "$MOCK_STATE/cloud-init-disabled" ]] || exit 1
@@ -482,7 +503,7 @@ if env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" MOCK_GPGV_FAIL=yes \
   exit 1
 fi
 [[ -s "$MOCK_STATE/gpgv-arguments" ]]
-[[ ! -e "$TEMP_DIR/images/ubuntu-24.04-server-cloudimg-amd64.img" ]]
+[[ ! -e "$TEMP_DIR/images/ubuntu-26.04-server-cloudimg-amd64.img" ]]
 [[ ! -e "$TEMP_DIR/images/vms/mock-agent.qcow2" ]]
 [[ ! -e "$MOCK_STATE/domain-defined" ]]
 rm -f -- "$MOCK_STATE/gpgv-arguments"
@@ -501,8 +522,10 @@ grep -Fq "codex-cli mock" "$TEMP_DIR/output"
 grep -Fq "Formal tools:   Lean 4, Isabelle/HOL, GHC, Cabal, HLS, HLint" \
   "$TEMP_DIR/output"
 grep -Fq "virt-manager --connect qemu:///system" "$TEMP_DIR/output"
-grep -Fq "192.168.122.51" "$TEMP_DIR/output"
+grep -Fq "kvm-agent-host ssh mock-agent" "$TEMP_DIR/output"
 grep -Fq "8192 MiB RAM, 2 vCPU, 120 GiB disk" "$TEMP_DIR/output"
+grep -Fq "Guest release:  Ubuntu 26.04 LTS desktop" "$TEMP_DIR/output"
+grep -Fq -- "--osinfo ubuntu26.04" "$MOCK_STATE/virt-install-arguments"
 grep -Fq "resize $TEMP_DIR/images/vms/mock-agent.qcow2 120G" \
   "$MOCK_STATE/qemu-img-resize"
 [[ -f "$MOCK_STATE/domain-defined" ]]
@@ -515,13 +538,49 @@ grep -Fq "resize $TEMP_DIR/images/vms/mock-agent.qcow2 120G" \
 [[ -f "$MOCK_STATE/cloud-init-cleaned" ]]
 [[ ! -e "$TEMP_DIR/images/vms/mock-agent-seed.img" ]]
 [[ -f "$TEMP_DIR/home/.local/share/kvm-agent/mock-agent/id_ed25519" ]]
+[[ -x "$TEMP_DIR/home/.local/bin/kvm-agent-host" ]]
+grep -Fxq "guest-user=agent" \
+  "$TEMP_DIR/home/.local/share/kvm-agent/mock-agent/provisioning-mode"
+grep -Fxq "guest-release=26.04" \
+  "$TEMP_DIR/home/.local/share/kvm-agent/mock-agent/provisioning-mode"
 grep -Fxq "formal-methods=yes" \
   "$TEMP_DIR/home/.local/share/kvm-agent/mock-agent/provisioning-mode"
+grep -Fxq "ssh-port-forwarding=no" \
+  "$TEMP_DIR/home/.local/share/kvm-agent/mock-agent/provisioning-mode"
 grep -Fq \
-  '["/usr/local/sbin/kvm-agent-provision", "agent", "yes", "192.168.122.1", "yes", "120", "none", "none"]' \
+  '["/usr/local/sbin/kvm-agent-provision", "agent", "yes", "192.168.122.1", "yes", "120", "none", "none", "26.04"]' \
   "$MOCK_STATE/user-data"
 grep -Fq "growpart:" "$MOCK_STATE/user-data"
 grep -Fq "resize_rootfs: true" "$MOCK_STATE/user-data"
+grep -Fq "AllowAgentForwarding no" "$MOCK_STATE/user-data"
+grep -Fq "AllowTcpForwarding no" "$MOCK_STATE/user-data"
+grep -Fq "AllowStreamLocalForwarding no" "$MOCK_STATE/user-data"
+grep -Fq "X11Forwarding no" "$MOCK_STATE/user-data"
+grep -Fq "/usr/local/bin/kvm-agent-authorize-controller-key" \
+  "$MOCK_STATE/user-data"
+grep -Fq "/usr/local/sbin/kvm-agent-harden-ssh" "$MOCK_STATE/user-data"
+
+# Finalization must fail closed if a stale or otherwise wrong guest release is
+# reached under the selected VM name. It must not disable cloud-init or detach
+# the credential-bearing seed in that case.
+rm -f -- \
+  "$MOCK_STATE/cloud-init-disabled" \
+  "$MOCK_STATE/cloud-init-cleaned" \
+  "$MOCK_STATE/seed-ejected"
+touch "$TEMP_DIR/images/vms/mock-agent-seed.img"
+if env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" MOCK_GUEST_RELEASE=24.04 \
+    "$TEMP_DIR/setup-under-test.sh" \
+      --finalize-existing --name mock-agent --user agent \
+      > "$TEMP_DIR/wrong-guest-release-output" 2>&1; then
+  echo "Finalization unexpectedly accepted an Ubuntu 24.04 guest." >&2
+  exit 1
+fi
+grep -Fq "Expected Ubuntu 26.04 LTS" \
+  "$TEMP_DIR/wrong-guest-release-output"
+[[ ! -f "$MOCK_STATE/cloud-init-disabled" ]]
+[[ ! -f "$MOCK_STATE/cloud-init-cleaned" ]]
+[[ ! -f "$MOCK_STATE/seed-ejected" ]]
+[[ -f "$TEMP_DIR/images/vms/mock-agent-seed.img" ]]
 
 env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
   "$TEMP_DIR/setup-under-test.sh" \
@@ -539,6 +598,7 @@ env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
 grep -Fq "Adding the 'worker' swarm role with 'tailscale' networking" \
   "$TEMP_DIR/add-swarm-output"
 grep -Fq "KVM-Agent swarm setup completed" "$TEMP_DIR/add-swarm-output"
+grep -Fq "kvm-agent-harden-ssh 'no' 'agent'" "$MOCK_STATE/ssh-calls"
 
 if env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
     "$TEMP_DIR/setup-under-test.sh" \
@@ -564,6 +624,14 @@ grep -Fq "Installing automatic research journals with 'claude' reporting" \
   "$TEMP_DIR/add-journal-output"
 grep -Fq "KVM-Agent research-journal setup completed" \
   "$TEMP_DIR/add-journal-output"
+
+env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
+  "$TEMP_DIR/setup-under-test.sh" \
+    --harden-existing --name mock-agent --user agent \
+    --allow-remote-editor \
+    > "$TEMP_DIR/harden-output"
+grep -Fq "KVM-Agent SSH hardening completed" "$TEMP_DIR/harden-output"
+grep -Fq "kvm-agent-harden-ssh 'local' 'agent'" "$MOCK_STATE/ssh-calls"
 
 : > "$MOCK_STATE/resource-changes"
 env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
@@ -669,12 +737,18 @@ rm -f -- "$MOCK_STATE/provisioning-failed"
 
 printf 'mockpass123\nmockpass123\nmock-agent\n' \
   | env PATH="$MOCK_PATH" MOCK_STATE="$MOCK_STATE" \
+      MOCK_OSINFO_26_AVAILABLE=no \
       "$TEMP_DIR/setup-under-test.sh" \
         --replace-existing --name mock-agent \
         --memory 8192 --vcpus 2 --disk 80 \
-        > "$TEMP_DIR/replace-output"
+        > "$TEMP_DIR/replace-output" 2>&1
 grep -Fxq -- "--name mock-agent --force" \
   "$MOCK_STATE/remove-arguments"
 grep -Fq "KVM-Agent setup completed" "$TEMP_DIR/replace-output"
+grep -Fq "using ubuntu24.04 only as compatible VM hardware metadata" \
+  "$TEMP_DIR/replace-output"
+grep -Fq -- "--osinfo ubuntu24.04" "$MOCK_STATE/virt-install-arguments"
+grep -Fq "Guest release:  Ubuntu 26.04 LTS desktop" \
+  "$TEMP_DIR/replace-output"
 
 echo "Mocked setup workflow passed."

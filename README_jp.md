@@ -60,7 +60,7 @@ flowchart TB
     H["信頼する Ubuntu ホストアカウント"]
     M["virt-manager と system libvirt"]
 
-    subgraph V["交換可能な Ubuntu 24.04 デスクトップ VM"]
+    subgraph V["交換可能な Ubuntu 26.04 デスクトップ VM"]
         D["GNOME デスクトップと端末"]
         A["Codex · Claude Code · OpenCode · Aider"]
         O["127.0.0.1 上の Ollama"]
@@ -83,6 +83,22 @@ system libvirt/KVM 境界を操作する GUI クライアントです。ホス�
 引き続き信頼主体であり、VM を完全に制御できます。コーディングエージェントを
 ホストへ導入することはありません。
 
+## コマンドで使う名前
+
+KVM-Agent では、用途の異なる複数の名前を使います。文書中の `YOUR_...` は
+すべて置き換えるプレースホルダーです。具体的なサンプル名には「例」と明記します。
+
+| 名前 | 例 | 使用箇所 |
+|---|---|---|
+| libvirt VM 名兼 guest hostname | `agent-research-a` | `--name`、`virsh`、`kvm-agent-host` |
+| guest login 名 | `agent` | Linux、OpenSSH |
+| Tailscale device 名 | `research-a-manager` | MagicDNS、Machines page |
+| Tailscale 複合 tag | `tag:swarm-research-a-manager` | 方向を制限した grants |
+| Mac の SSH alias | `research-a-manager` | macOS の `ssh`、`scp` |
+
+物理 host の通称は `--name` の引数ではありません。複数 machine を接続する前に
+[安全なリモートアクセス](docs/remote-access_jp.md#どの名前が何を表すか)を参照してください。
+
 ## スクリプトが行うこと
 
 通常の Ubuntu ホストアカウントから実行すると、スクリプトは次を行います。
@@ -91,7 +107,7 @@ system libvirt/KVM 境界を操作する GUI クライアントです。ホス�
    `sudo` で導入する。
 2. そのホストアカウントを `libvirt` グループへ追加する。
 3. libvirt の標準 NAT ネットワークを起動する。
-4. Ubuntu 24.04 のリリース版 amd64 クラウドイメージをダウンロードし、
+4. Ubuntu 26.04 のリリース版 amd64 クラウドイメージをダウンロードし、
    Ubuntu が GPG 署名した SHA-256 一覧に対して検証する。
 5. ローカル GUI 用パスワードを尋ね、専用の復旧 SSH 鍵を作る。
 6. SPICE、virtio video、クリップボード連携、Ubuntu デスクトップを持ち、
@@ -106,10 +122,13 @@ system libvirt/KVM 境界を操作する GUI クライアントです。ホス�
    専用 SSH key、password lock 済み non-sudo worker account に加え、安全な Tailscale
    naming、host-key 検証、固定 SSH/rsync access、remote-job lifecycle 用 helper を追加する。
    Tailscale authentication と manager-key authorization は人間が明示的に行う。
-10. ベンダー installer を実行する前に、未要求の inbound 通信と、既定では
+10. host 側の `kvm-agent-host` helper、guest 側の controller-key helper、および
+   password、root、agent、X11、tunnel、port forwarding を既定で拒否する
+   OpenSSH baseline を導入する。
+11. ベンダー installer を実行する前に、未要求の inbound 通信と、既定では
    private・link-local address range への outbound 通信を拒否する guest firewall を
    構成する（インターネット接続は開いたまま）。
-11. 各コマンドを検証し、Ollama をゲストのループバック
+12. 各コマンドを検証し、Ollama をゲストのループバック
    (`127.0.0.1:11434`) に限定し、将来の cloud-init 実行を無効化してから、
    プロビジョニング完了後に cloud-init seed を破棄する。
 
@@ -137,7 +156,7 @@ download、disk、provisioning 費用を負いません。
 | 構成要素 | 対応構成 |
 |---|---|
 | ホスト | Ubuntu 24.04 または 26.04 LTS、x86-64 |
-| ゲスト | Ubuntu 24.04 LTS、amd64 |
+| ゲスト | Ubuntu 26.04 LTS、amd64 |
 | ファームウェア | Intel VT-x または AMD-V が有効 |
 | ホスト権限 | 実行アカウントが `sudo` を利用可能 |
 | ネットワーク | 初回プロビジョニング中にインターネット接続 |
@@ -150,15 +169,45 @@ download、disk、provisioning 費用を負いません。
 16 GiB/8-thread host では通常約 12 GiB・6 vCPU、64 GiB/32-thread host では
 32 GiB・16 vCPU になります。`--memory` と `--vcpus` の明示値は引き続き優先されます。
 
+## ゲスト release の保証
+
+新規 VM は Ubuntu 公式リリース版
+`ubuntu-26.04-server-cloudimg-amd64.img` から作成します。Setup は署名済み image
+manifest を検証し、guest provisioning の最初に `26.04` を照合し、さらに管理対象の
+復旧 channel から `/etc/os-release` を再確認します。Guest が Ubuntu 26.04 を報告しない
+場合、最終 cleanup を拒否します。確認済み release は
+`/var/lib/kvm-agent/installed-versions.txt` にも記録します。
+
+Ubuntu 24.04 host の一部では、`libosinfo` database が `ubuntu26.04` identifier より
+古いことがあります。その場合、script は `virt-install` の互換
+**仮想 hardware metadata** としてだけ `ubuntu24.04` を使うと明示します。これは
+Ubuntu 24.04 を選択・導入する指定ではありません。Disk URL、署名済み checksum、
+guest 内の初期確認と最終確認はすべて 26.04 に固定されたままです。
+
+Repository を更新しても、作成済み VM の OS は変わりません。信頼する Ubuntu host
+から次で確認できます。
+
+```bash
+kvm-agent-host ssh YOUR_VM_NAME cat /etc/os-release
+```
+
+24.04 と表示された場合、残したい作業を VM 外へコピーし、内容を確認してから
+`--replace-existing` を使います。この option は選択した guest を意図的に削除して
+再作成します。[トラブルシューティング](docs/troubleshooting_jp.md#既存-guest-が-ubuntu-2404)
+の保護付き移行手順に従ってください。
+
 ## クイックスタート
 
 このリポジトリをダウンロードまたは clone し、次を実行します。
 
 ```bash
-cd kvm-agent
+cd YOUR_AGENT_VM_DIRECTORY
 chmod +x setup-kvm-agent.sh
 ./setup-kvm-agent.sh
 ```
+
+`YOUR_AGENT_VM_DIRECTORY` は置き換える名前です。Git clone なら通常 `agent-vm`、
+ZIP download なら `agent-vm-main` などの名前で展開されます。
 
 `sudo ./setup-kvm-agent.sh` として実行しては**いけません**。`virt-manager` を
 使うホストアカウントから実行してください。必要な操作だけスクリプト内部で
@@ -216,7 +265,8 @@ hlint --version
 ## オプション
 
 ```text
---name NAME        VM とホスト名（既定: kvm-agent）
+--name NAME        libvirt VM 名兼 guest Linux hostname
+                   （新規 VM のみ既定: kvm-agent）
 --user NAME        ゲストのログイン名（既定: agent）
 --memory MB        ゲスト RAM（MiB）
 --vcpus NUMBER     ゲスト仮想 CPU 数
@@ -227,10 +277,14 @@ hlint --version
                    社内ミラーやモデル endpoint が必要な場合のみ
 --formal-methods   guest 内へ Lean、Isabelle/HOL、Haskell tool、VS Code、
                    公式 Lean/Haskell extension を追加する
+--allow-remote-editor
+                   remote editor 用に client 発の local SSH forwarding を許可する。
+                   agent forwarding と X11 forwarding は無効のまま
 --swarm-role ROLE  guest を "manager"、"worker"、または "both" として準備する
 --swarm-network N  swarm 通信に "tailscale"（既定）または "wireguard" を使う
 --add-swarm ROLE   provisioning 済みの管理対象 VM に swarm role を追加する
 --add-journal      既存の管理対象 VM に自動 research journal を追加する
+--harden-existing  指定した既存 VM に現在の SSH baseline を再適用する
 --journal-project P
                    guest 内の Git project P を初期化する。複数回指定可能
 --journal-backend B
@@ -239,7 +293,7 @@ hlint --version
                    長さ制限済み project metadata の provider 送信に同意する。
                    claude/codex backend では必須
 --journal-timezone Z
-                   IANA timezone Z（既定: Europe/Prague）
+                   IANA timezone Z（既定: Etc/UTC）
 --resize-existing  powered-off の既存 VM を削除せず、永続 RAM/vCPU 割当を変更する
 --replace-existing 指定した既存 VM を正確な名前の確認後に削除し、再作成する
 --finalize-existing
@@ -328,10 +382,11 @@ Provisioning 済みで起動中の VM に、物理 host から後付けできま
 ./setup-kvm-agent.sh \
   --add-journal \
   --name kvm-agent \
-  --journal-project /home/agent/PSL_Neural
+  --journal-project /home/agent/YOUR_PROJECT
 ```
 
-Project path は guest 内の path です。同じ VM の複数 repository には
+`YOUR_PROJECT` は置き換える名前で、project path は guest 内の path です。
+同じ VM の複数 repository には
 `--journal-project` を繰り返します。VM は再作成しません。Agent-neutral な event
 instruction、canonical JSON と static HTML report、07:00 daily、土曜 weekly、毎月1日の
 persistent timer を追加します。安全な既定値は model provider へ data を送らない deterministic
@@ -400,67 +455,29 @@ snapshot、更新、復旧 SSH、データ移動については
 
 ### ホストとゲストの間でファイルを転送する
 
-ローカルで動く VM であっても、ゲストは独立した filesystem を持ちます。ホスト側の
-通常の `cp` からゲスト内の `/home/agent` は見えません。また KVM-Agent は意図的に
-ホスト directory を共有しません。VM 実行中の通常の転送には、libvirt の private
-network 上でホストから開始する `scp` を使います。
-
-Setup は専用の復旧鍵をホスト上に作り、その公開鍵だけをゲストへ登録済みです。既定の
-VM 名と利用者名では、ホスト上で現在の address と SSH option を次のように準備します。
+VM は独立した filesystem を持ち、host directory は共有しません。Setup は、
+復旧鍵、現在の IP 検出、host-key 固定、全 forwarding 無効化をまとめた host helper を
+自動導入します。物理 Ubuntu host から project を送るには次を実行します。
 
 ```bash
-VM_NAME=kvm-agent
-VM_USER=agent
-KEY_DIR="$HOME/.local/share/kvm-agent/$VM_NAME"
-VM_IP="$(
-  sudo virsh --connect qemu:///system \
-    domifaddr "$VM_NAME" --source lease |
-    awk '$3 == "ipv4" { sub(/\/.*/, "", $4); print $4; exit }'
-)"
-test -n "$VM_IP" || {
-  echo "Guest IPv4 address が見つかりません。VM を起動して再実行してください。" >&2
-  exit 1
-}
-
-test -r "$KEY_DIR/id_ed25519" || {
-  echo "Recovery key が見つかりません: $KEY_DIR/id_ed25519" >&2
-  exit 1
-}
-
-SSH_OPTS=(
-  -o BatchMode=yes
-  -o ConnectTimeout=10
-  -o ForwardAgent=no
-  -o IdentitiesOnly=yes
-  -o IdentityAgent=none
-  -o StrictHostKeyChecking=accept-new
-  -o "UserKnownHostsFile=$KEY_DIR/known_hosts"
-  -i "$KEY_DIR/id_ed25519"
-)
+kvm-agent-host push kvm-agent ./my-project Work/
 ```
 
-File または directory を**ホストからゲストへ**コピーする例:
+結果を自動作成される隔離 directory へ取り出すには次を実行します。
 
 ```bash
-scp "${SSH_OPTS[@]}" -r ./my-project \
-  "$VM_USER@$VM_IP:/home/$VM_USER/"
+kvm-agent-host pull kvm-agent Work/agent-result.patch
 ```
 
-File または directory を**ゲストからホストへ**コピーする場合も、操作はホストから
-開始します。
+`kvm-agent` は実際の libvirt VM 名へ置き換えます。どちら向きの転送も信頼する
+host 側から開始します。復旧 private key を guest へコピーしたり SSH agent
+forwarding を有効にしたりしてはいけません。Pull は実行権限を外し、device・special
+file・symbolic link を拒否してから隔離 directory に保存します。
 
-```bash
-mkdir -p "$HOME/vm-extraction-quarantine"
-chmod 700 "$HOME/vm-extraction-quarantine"
-
-scp "${SSH_OPTS[@]}" -r \
-  "$VM_USER@$VM_IP:/home/$VM_USER/Work/my-project" \
-  "$HOME/vm-extraction-quarantine/"
-```
-
-File 一つだけなら `-r` を外します。Setup で既定以外の値を使った場合は `VM_NAME` と
-`VM_USER` を変更してください。復旧 private key は必ずホストに残し、ゲストへ
-コピーしたり SSH agent forwarding を有効にしたりしてはいけません。
+別の信頼する Mac から操作する場合は、専用鍵、harden 済み `~/.ssh/config`、
+Tailscale role、Mac 発の `scp` を含む
+[Ubuntu host または macOS controller からの安全なアクセス](docs/remote-access_jp.md)
+に従ってください。
 
 侵害された可能性があるゲストから取り出したものは、すべて非信頼データとして扱います。
 実行、build、IDE workspace としての open、重要 repository への移動より先に、隔離
@@ -508,6 +525,7 @@ image または pin 済み bundle に置き換えてください。
 - [セキュリティポリシーと脅威モデル](SECURITY_jp.md)
 - [設計と信頼境界](docs/design_jp.md)
 - [日常運用](docs/daily-use_jp.md)
+- [Ubuntu host または macOS controller からの安全なアクセス](docs/remote-access_jp.md)
 - [認証情報の取り扱い](docs/credentials_jp.md)
 - [エージェントツールとモデルサービス](docs/agent-tools-and-model-services_jp.md)
 - [縮小形式手法環境](docs/formal-methods_jp.md)

@@ -113,6 +113,51 @@ Then retry. A captive portal, TLS-inspecting proxy, incomplete mirror update,
 or stale keyring can cause failure. The cached image is used only if it matches
 the checksum recorded after a successful signed-manifest verification.
 
+## An existing guest is Ubuntu 24.04
+
+Installing a corrected repository does not upgrade an existing VM. Confirm the
+selected guest from the trusted Ubuntu host:
+
+```bash
+kvm-agent-host ssh YOUR_VM_NAME cat /etc/os-release
+```
+
+New setup and finalization require Ubuntu 26.04. A 24.04 result therefore means
+that the VM was created by an older version. For this disposable security
+boundary, rebuilding from the reviewed 26.04 image is more predictable than an
+in-place distribution upgrade with accumulated agent and installer state.
+
+First pull only the source, patches, reports, or other work that must survive:
+
+```bash
+kvm-agent-host pull YOUR_VM_NAME Work/
+```
+
+The helper puts the result below
+`~/vm-extraction-quarantine/YOUR_VM_NAME/`, removes executable permission, and
+rejects links and special files. Inspect the data before restoring it. Avoid
+copying package caches, build products, browser profiles, provider sessions, or
+long-lived credentials into the replacement guest; rebuild dependencies from
+reviewed manifests instead.
+
+Then inspect the exact removal scope:
+
+```bash
+./remove-kvm-agent.sh --name YOUR_VM_NAME --dry-run
+```
+
+Only after confirming the export and the selected name, rebuild:
+
+```bash
+./setup-kvm-agent.sh --replace-existing --name YOUR_VM_NAME
+```
+
+Add the same opt-in flags required for the replacement, such as
+`--formal-methods` or `--swarm-role`. The command displays the VM-specific
+artifacts and requires the exact VM name before deletion. The old 24.04 base
+image may remain in the shared cache, but the corrected setup uses the distinct
+26.04 filename and cannot reuse it as the new guest disk.
+
 ## A VM or disk already exists
 
 The script fails rather than overwriting:

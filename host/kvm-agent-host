@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+readonly LIBVIRT_URI="qemu:///system"
+readonly STATE_ROOT="${HOME}/.local/share/kvm-agent"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  kvm-agent-host list
+  kvm-agent-host status VM_NAME
+  kvm-agent-host start VM_NAME
+  kvm-agent-host shutdown VM_NAME
+  kvm-agent-host ip VM_NAME
+  kvm-agent-host ssh VM_NAME [COMMAND [ARG ...]]
+  kvm-agent-host push VM_NAME LOCAL_PATH [GUEST_PATH]
+  kvm-agent-host pull VM_NAME GUEST_PATH [LOCAL_DESTINATION]
+  kvm-agent-host --user GUEST_USER COMMAND ...
+
+Run this command on the trusted physical Ubuntu host. It discovers the current
+libvirt address and uses only the VM-specific recovery key and known-hosts file.
+
+Defaults:
+  push destination:  Work/
+  pull destination:  ~/vm-extraction-quarantine/VM_NAME/
+EOF
+}
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+valid_vm_name() {
+  [[ "$1" =~ ^[a-z][a-z0-9-]{0,62}$ ]]
+}
+
+valid_user_name() {
+  [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$1" != root ]]
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die \
+    "Required command is unavailable: $1"
+}
+
+domain_exists() {
+  virsh --connect "$LIBVIRT_URI" dominfo "$vm_name" >/dev/null 2>&1
+}
+
+guest_address() {
+  local address
+
+  address="$({
+    LC_ALL=C virsh --connect "$LIBVIRT_URI" \
+      domifaddr "$vm_name" --source lease
+  } | awk '
+      $3 == "ipv4" {
+        sub(/\/.*/, "", $4)
+        print $4
+        exit
+      }
+    ')" || die "Could not query the libvirt address for '$vm_name'."
+  [[ -n "$address" ]] || die \
+    "No IPv4 lease was found for '$vm_name'. Start the VM, wait for boot, and retry."
+  printf '%s\n' "$address"
+}
+
+load_connection() {
+  local recorded_user=""
+
+  valid_vm_name "$vm_name" || die \
+    "VM_NAME must start with a lowercase letter and contain only a-z, 0-9, or '-'."
+  domain_exists || die "No libvirt VM named '$vm_name' exists."
+
+  key_dir="${STATE_ROOT}/${vm_name}"
+  private_key="${key_dir}/id_ed25519"
+  known_hosts="${key_dir}/known_hosts"
+  mode_file="${key_dir}/provisioning-mode"
+
+  [[ -r "$private_key" ]] || die \
+    "Recovery key not found: $private_key"
+  [[ ! -e "$known_hosts" || -f "$known_hosts" ]] || die \
+    "Known-hosts path is not a regular file: $known_hosts"
+
+  if [[ -z "$guest_user" && -r "$mode_file" ]]; then
+    recorded_user="$(sed -n 's/^guest-user=//p' "$mode_file" | head -n 1)"
+    if [[ -n "$recorded_user" ]]; then
+      valid_user_name "$recorded_user" || die \
+        "Invalid guest-user entry in $mode_file"
+      guest_user="$recorded_user"
+    fi
+  fi
+  guest_user="${guest_user:-agent}"
+  valid_user_name "$guest_user" || die "Invalid guest user: $guest_user"
+
+  guest_ip="$(guest_address)"
+  ssh_options=(
+    -o ClearAllForwardings=yes
+    -o ConnectTimeout=10
+    -o ConnectionAttempts=1
+    -o ForwardAgent=no
+    -o ForwardX11=no
+    -o "HostKeyAlias=kvm-agent-${vm_name}"
+    -o HostKeyAlgorithms=ssh-ed25519
+    -o IdentitiesOnly=yes
+    -o IdentityAgent=none
+    -o ServerAliveCountMax=2
+    -o ServerAliveInterval=15
+    -o StrictHostKeyChecking=accept-new
+    -o "UserKnownHostsFile=${known_hosts}"
+    -i "$private_key"
+  )
+}
+
+build_remote_shell() {
+  local argument
+
+  printf -v remote_shell '%q' ssh
+  for argument in "${ssh_options[@]}"; do
+    printf -v remote_shell '%s %q' "$remote_shell" "$argument"
+  done
+}
+
+guest_user=""
+if [[ "${1:-}" == "--user" ]]; then
+  (($# >= 3)) || {
+    usage >&2
+    exit 2
+  }
+  guest_user="$2"
+  shift 2
+fi
+
+command_name="${1:-}"
+[[ -n "$command_name" ]] || {
+  usage >&2
+  exit 2
+}
+shift
+
+case "$command_name" in
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+esac
+
+require_command virsh
+
+case "$command_name" in
+  list)
+    (($# == 0)) || die "list takes no VM name."
+    virsh --connect "$LIBVIRT_URI" list --all --name | sed '/^[[:space:]]*$/d'
+    ;;
+  status|start|shutdown|ip|ssh|push|pull)
+    (($# >= 1)) || die "$command_name requires VM_NAME."
+    vm_name="$1"
+    shift
+    ;;
+  *)
+    usage >&2
+    die "Unknown command: $command_name"
+    ;;
+esac
+
+case "$command_name" in
+  status)
+    (($# == 0)) || die "status accepts only VM_NAME."
+    valid_vm_name "$vm_name" || die "Invalid VM name: $vm_name"
+    virsh --connect "$LIBVIRT_URI" dominfo "$vm_name"
+    ;;
+  start)
+    (($# == 0)) || die "start accepts only VM_NAME."
+    valid_vm_name "$vm_name" || die "Invalid VM name: $vm_name"
+    virsh --connect "$LIBVIRT_URI" start "$vm_name"
+    ;;
+  shutdown)
+    (($# == 0)) || die "shutdown accepts only VM_NAME."
+    valid_vm_name "$vm_name" || die "Invalid VM name: $vm_name"
+    printf 'Requesting a normal ACPI shutdown for %s.\n' "$vm_name"
+    virsh --connect "$LIBVIRT_URI" shutdown "$vm_name"
+    ;;
+  ip)
+    (($# == 0)) || die "ip accepts only VM_NAME."
+    valid_vm_name "$vm_name" || die "Invalid VM name: $vm_name"
+    domain_exists || die "No libvirt VM named '$vm_name' exists."
+    guest_address
+    ;;
+  ssh)
+    require_command ssh
+    load_connection
+    exec ssh "${ssh_options[@]}" "${guest_user}@${guest_ip}" "$@"
+    ;;
+  push)
+    (($# == 1 || $# == 2)) || die \
+      "push requires LOCAL_PATH and optionally GUEST_PATH."
+    require_command ssh
+    require_command rsync
+    local_path="$1"
+    guest_path="${2:-Work/}"
+    [[ -e "$local_path" ]] || die "Local source does not exist: $local_path"
+    [[ -n "$guest_path" && "$guest_path" != -* \
+        && "$guest_path" != *$'\n'* && "$guest_path" != *$'\r'* ]] \
+      || die "Unsafe guest destination."
+    load_connection
+    build_remote_shell
+    rsync -a --human-readable --info=progress2 --protect-args \
+      -e "$remote_shell" -- \
+      "$local_path" "${guest_user}@${guest_ip}:${guest_path}"
+    ;;
+  pull)
+    (($# == 1 || $# == 2)) || die \
+      "pull requires GUEST_PATH and optionally LOCAL_DESTINATION."
+    require_command ssh
+    require_command rsync
+    guest_path="$1"
+    local_destination="${2:-${HOME}/vm-extraction-quarantine/${vm_name}/}"
+    [[ -n "$guest_path" && "$guest_path" != -* \
+        && "$guest_path" != *$'\n'* && "$guest_path" != *$'\r'* ]] \
+      || die "Unsafe guest source."
+    [[ -n "$local_destination" && "$local_destination" != -* ]] || die \
+      "Unsafe local destination."
+    install -d -m 0700 "$local_destination"
+    load_connection
+    build_remote_shell
+    rsync -a --no-links --safe-links --no-devices --no-specials \
+      --chmod=Du=rwx,Dgo=,Fu=rw,Fgo= \
+      --human-readable --info=progress2 --protect-args \
+      -e "$remote_shell" -- \
+      "${guest_user}@${guest_ip}:${guest_path}" "$local_destination"
+    printf '\nCopied guest output into an untrusted-data quarantine:\n  %s\n' \
+      "$local_destination"
+    printf 'Review it before executing, building, or opening it as an IDE workspace.\n'
+    ;;
+esac

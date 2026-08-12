@@ -152,12 +152,17 @@ designed on the assumption that they still hold.
 - inbound SSH is normally accepted only from the libvirt gateway; an opt-in
   swarm worker additionally accepts it on the selected overlay interface;
 - root and SSH password login are disabled;
-- SSH agent forwarding and X11 forwarding are disabled;
+- SSH agent forwarding, X11 forwarding, tunnels, user startup hooks, and port
+  forwarding are disabled; client-initiated local forwarding is available only
+  through the explicit two-sided remote-editor opt-in;
 - Ollama listens only on guest loopback; and
 - no cloud credential or model weight is installed automatically.
 
 Neither list is enforcement against a host administrator. `virt-manager` can
 later add shares, devices, networks, or snapshots that change the threat model.
+The generated client and server options, including why `ForwardAgent no`,
+`ForwardX11 no`, and `ClearAllForwardings yes` are written explicitly, are
+documented in [Secure remote access](docs/remote-access.md).
 
 ## GUI-specific risks
 

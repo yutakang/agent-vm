@@ -191,9 +191,11 @@ The setup script creates:
 ```
 
 Only the public key enters the guest. Password authentication, root login, SSH
-agent forwarding, and X11 forwarding are disabled. The key is for provisioning
-status and recovery when the GUI is unavailable; daily work may remain entirely
-inside `virt-manager`.
+agent forwarding, X11 forwarding, tunnels, and port forwarding are disabled by
+default. The key is for provisioning status and recovery when the GUI is
+unavailable; daily work may remain entirely inside `virt-manager`. The installed
+`kvm-agent-host` wrapper applies the matching client restrictions automatically.
+See [Secure remote access](remote-access.md).
 
 The host key is stored in a per-VM `known_hosts` file. Reusing a VM name does not
 silently share one global host-key decision with other SSH connections.

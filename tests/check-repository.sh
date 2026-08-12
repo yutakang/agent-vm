@@ -6,6 +6,10 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 SETUP_SCRIPT="${REPO_DIR}/setup-kvm-agent.sh"
 REMOVE_SCRIPT="${REPO_DIR}/remove-kvm-agent.sh"
+HOST_HELPER="${REPO_DIR}/host/kvm-agent-host"
+CONTROLLER_HELPER="${REPO_DIR}/guest/kvm-agent-authorize-controller-key"
+SSH_HARDENER="${REPO_DIR}/guest/kvm-agent-harden-ssh"
+MAC_HELPER="${REPO_DIR}/macos/setup-secure-access.sh"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -18,6 +22,12 @@ bash -n "$SETUP_SCRIPT"
 bash -n "$REMOVE_SCRIPT"
 "$REMOVE_SCRIPT" --help >/dev/null
 [[ -x "$REMOVE_SCRIPT" ]] || fail "remove-kvm-agent.sh is not executable"
+for helper in "$HOST_HELPER" "$CONTROLLER_HELPER" "$SSH_HARDENER" "$MAC_HELPER"; do
+  bash -n "$helper"
+  [[ -x "$helper" ]] || fail "security helper is not executable: $helper"
+done
+"$HOST_HELPER" --help >/dev/null
+"$MAC_HELPER" --help >/dev/null
 [[ -x "${SCRIPT_DIR}/mock-swarm-job.sh" ]] || fail \
   "mock-swarm-job.sh is not executable"
 [[ -x "${SCRIPT_DIR}/mock-journal.sh" ]] || fail \
@@ -38,6 +48,24 @@ if ((EUID == 0)); then
   grep -Fq "not as root" <<< "$remove_root_output" || fail \
     "remove script did not reject direct root execution"
 fi
+
+for existing_operation in \
+    '--finalize-existing' \
+    '--add-swarm worker' \
+    '--add-journal' \
+    '--harden-existing' \
+    '--resize-existing --memory 8192'; do
+  # Word splitting is intentional for these fixed, test-owned option strings.
+  # shellcheck disable=SC2086
+  operation_output="$($SETUP_SCRIPT $existing_operation 2>&1 || true)"
+  grep -Fq 'Operations on an existing VM require --name' \
+    <<< "$operation_output" || fail \
+    "existing-VM operation did not require an explicit name: $existing_operation"
+done
+replace_output="$($SETUP_SCRIPT --replace-existing 2>&1 || true)"
+grep -Fq -- '--replace-existing requires an explicit --name' \
+  <<< "$replace_output" || fail \
+  "replacement did not require an explicit VM name"
 
 TEMP_DIR="$(mktemp -d)"
 trap 'rm -rf -- "$TEMP_DIR"' EXIT
@@ -182,6 +210,7 @@ for required in \
     DISCLAIMER.md DISCLAIMER_jp.md \
     docs/design.md docs/design_jp.md \
     docs/daily-use.md docs/daily-use_jp.md \
+    docs/remote-access.md docs/remote-access_jp.md \
     docs/credentials.md docs/credentials_jp.md \
     docs/agent-tools-and-model-services.md \
     docs/agent-tools-and-model-services_jp.md \
@@ -194,6 +223,9 @@ for required in \
 done
 
 for required_text in \
+    'readonly GUEST_RELEASE="26.04"' \
+    'readonly GUEST_OSINFO_PREFERRED="ubuntu${GUEST_RELEASE}"' \
+    'readonly GUEST_OSINFO_COMPATIBILITY="ubuntu24.04"' \
     "readonly DEFAULT_DISK_GB=120" \
     "readonly SWARM_PROVISION_TIMEOUT_SECONDS=1800" \
     "https://chatgpt.com/codex/install.sh" \
@@ -214,6 +246,8 @@ for required_text in \
     "--swarm-role" \
     "--add-swarm" \
     "--add-journal" \
+    "--harden-existing" \
+    "--allow-remote-editor" \
     "--journal-project" \
     "--journal-allow-remote-reporting" \
     "readonly JOURNAL_PROVISION_TIMEOUT_SECONDS=1200" \
@@ -226,8 +260,14 @@ for required_text in \
     "HOST_CPUS * 3 / 4" \
     "OLLAMA_HOST=127.0.0.1:11434" \
     "ubuntu-desktop-minimal" \
+    'readonly IMAGE_NAME="ubuntu-${GUEST_RELEASE}-server-cloudimg-${GUEST_ARCH}.img"' \
+    'readonly IMAGE_BASE_URL="https://cloud-images.ubuntu.com/releases/${GUEST_RELEASE}/release"' \
+    '--osinfo "$GUEST_OSINFO"' \
+    'printf '\''guest-release=%s\n'\'' "$GUEST_RELEASE"' \
     "graphics \"spice,listen=none\"" \
     "ForwardAgent=no" \
+    "ClearAllForwardings=yes" \
+    "AllowTcpForwarding" \
     "ufw default deny incoming" \
     "ufw --force enable" \
     "/etc/cloud/cloud-init.disabled" \
@@ -237,6 +277,20 @@ for required_text in \
     "usermod -aG libvirt --"; do
   grep -Fq -- "$required_text" "$SETUP_SCRIPT" \
     || fail "setup script is missing: $required_text"
+done
+
+for required_guest_release_check in \
+    'expected_guest_release="${8:?expected guest release is required}"' \
+    'actual_guest_release="$(os_release_value VERSION_ID)"' \
+    'Refusing to provision the wrong guest release.' \
+    'Guest OS: Ubuntu %s LTS'; do
+  grep -Fq -- "$required_guest_release_check" "$TEMP_DIR/guest-provision.sh" \
+    || fail "guest release enforcement is missing: $required_guest_release_check"
+done
+
+for overview in "${REPO_DIR}/README.md" "${REPO_DIR}/README_jp.md"; do
+  grep -Fq -- 'Ubuntu 26.04' "$overview" \
+    || fail "overview does not identify Ubuntu 26.04 as the guest: $overview"
 done
 
 for required_swarm_text in \
@@ -253,6 +307,10 @@ for required_swarm_text in \
     'systemctl enable --now tailscaled.service' \
     'DPkg::Lock::Timeout=600' \
     'kvm-agent-swarm-tailscale-up' \
+    '--advertise-tags="$device_tag"' \
+    '--accept-routes=false' \
+    '--ssh=false' \
+    'SECURITY WARNING: this Tailscale device is untagged' \
     'kvm-agent-swarm-configure-worker' \
     'StrictHostKeyChecking yes' \
     'User agent-worker' \
@@ -260,6 +318,74 @@ for required_swarm_text in \
     'SSH ED25519 host-key fingerprint:'; do
   grep -Fq -- "$required_swarm_text" "$TEMP_DIR/swarm-provision.sh" \
     || fail "swarm provisioning is missing: $required_swarm_text"
+done
+
+for required_host_security in \
+    'ClearAllForwardings=yes' \
+    'ForwardAgent=no' \
+    'ForwardX11=no' \
+    'IdentityAgent=none' \
+    'HostKeyAlias=kvm-agent-' \
+    'vm-extraction-quarantine' \
+    '--no-links' \
+    '--safe-links' \
+    '--no-devices' \
+    '--no-specials' \
+    '--chmod=Du=rwx,Dgo=,Fu=rw,Fgo=' \
+    '--protect-args'; do
+  grep -Fq -- "$required_host_security" "$HOST_HELPER" || fail \
+    "host access helper is missing: $required_host_security"
+done
+
+for required_guest_security in \
+    'no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc' \
+    'Provide one valid ssh-ed25519' \
+    'Refusing to update a symbolic-link SSH path'; do
+  grep -Fq -- "$required_guest_security" "$CONTROLLER_HELPER" || fail \
+    "controller-key helper is missing: $required_guest_security"
+done
+
+for required_sshd_security in \
+    '/etc/ssh/sshd_config.d/00-kvm-agent.conf' \
+    'PasswordAuthentication no' \
+    'PermitRootLogin no' \
+    'AuthenticationMethods publickey' \
+    'AllowAgentForwarding no' \
+    'AllowTcpForwarding ${forwarding_mode}' \
+    'AllowStreamLocalForwarding ${forwarding_mode}' \
+    'X11Forwarding no' \
+    'PermitTunnel no' \
+    'sshd -t' \
+    'sshd -T -C'; do
+  grep -Fq -- "$required_sshd_security" "$SSH_HARDENER" || fail \
+    "SSH hardener is missing: $required_sshd_security"
+done
+if rg -n 'sshd_config\.d/90-kvm-agent\.conf' \
+    "$SETUP_SCRIPT" "$SSH_HARDENER" "${REPO_DIR}/docs" >/dev/null; then
+  fail "SSH baseline uses a late-sorting drop-in that permissive defaults can precede"
+fi
+
+for required_mac_security in \
+    'Include ~/.ssh/kvm-agent.d/*.conf' \
+    'IdentityAgent none' \
+    'ForwardAgent no' \
+    'ForwardX11 no' \
+    'ClearAllForwardings' \
+    'ProxyJump none' \
+    'StrictHostKeyChecking ask' \
+    'AddKeysToAgent no' \
+    'UseKeychain yes'; do
+  grep -Fq -- "$required_mac_security" "$MAC_HELPER" || fail \
+    "macOS access helper is missing: $required_mac_security"
+done
+
+for guide in \
+    "${REPO_DIR}/README.md" "${REPO_DIR}/README_jp.md" \
+    "${REPO_DIR}/docs/daily-use.md" "${REPO_DIR}/docs/daily-use_jp.md"; do
+  grep -Fq -- 'kvm-agent-host push' "$guide" || fail \
+    "guide omits the short host transfer command: $guide"
+  grep -Fq -- 'kvm-agent-host pull' "$guide" || fail \
+    "guide omits the quarantined host pull command: $guide"
 done
 
 grep -Fq -- 'guest_ssh_to "$GUEST_IP" "$SWARM_PROVISION_TIMEOUT_SECONDS"' "$SETUP_SCRIPT" \
@@ -379,16 +505,23 @@ awk "
 " "$SETUP_SCRIPT" \
   || fail "the guest cloud-init cleanup no longer aborts on unexpected errors"
 
-# Swarm roles are independent of libvirt VM names. Keep the primary examples
-# on the repository default and prevent role-looking example names from
-# reintroducing recovery-key lookup confusion.
+# Swarm roles are independent of libvirt VM names. Require explicit placeholders,
+# composite subgroup tags, and the secure helper path in both languages.
 for swarm_doc in "${REPO_DIR}/docs/swarm.md" "${REPO_DIR}/docs/swarm_jp.md"; do
-  grep -Fq -- '`kvm-agent`' "$swarm_doc" \
-    || fail "swarm guide does not explain the default VM name: $swarm_doc"
-  grep -Fq -- 'Laptop_A' "$swarm_doc" \
-    || fail "swarm guide omits the generic manager-host name: $swarm_doc"
-  grep -Fq -- 'Desktop_B' "$swarm_doc" \
-    || fail "swarm guide omits the generic worker-host name: $swarm_doc"
+  grep -Fq -- 'YOUR_MANAGER_LIBVIRT_VM_NAME' "$swarm_doc" \
+    || fail "swarm guide omits the manager VM placeholder: $swarm_doc"
+  grep -Fq -- 'YOUR_WORKER_LIBVIRT_VM_NAME' "$swarm_doc" \
+    || fail "swarm guide omits the worker VM placeholder: $swarm_doc"
+  grep -Fq -- 'tag:swarm-research-a-manager' "$swarm_doc" \
+    || fail "swarm guide omits composite subgroup tags: $swarm_doc"
+  grep -Fq -- 'tag:swarm-research-b-worker' "$swarm_doc" \
+    || fail "swarm guide omits the second isolated group: $swarm_doc"
+  grep -Fq -- '"trusted-mac": "100.64.0.10"' "$swarm_doc" \
+    || fail "swarm guide omits the device-specific Mac alias: $swarm_doc"
+  grep -Fq -- '"acls": []' "$swarm_doc" \
+    || fail "swarm guide omits the explicit deny-all legacy ACL: $swarm_doc"
+  grep -Fq -- '"tests"' "$swarm_doc" \
+    || fail "swarm guide omits Tailscale policy tests: $swarm_doc"
   for helper in \
       kvm-agent-swarm-tailscale-up \
       kvm-agent-swarm-worker-info \
@@ -403,6 +536,9 @@ for swarm_doc in "${REPO_DIR}/docs/swarm.md" "${REPO_DIR}/docs/swarm_jp.md"; do
     fail "swarm guide uses a role as a VM name: $swarm_doc"
   fi
 done
+if rg -n --glob 'swarm*.md' '(Laptop_A|Desktop_B)' "${REPO_DIR}/docs" >/dev/null; then
+  fail "swarm guides retain unexplained example-host names"
+fi
 if rg -n -i --glob '*.md' --glob '*.sh' --glob '!check-repository.sh' '(dell|galleria)' "$REPO_DIR" >/dev/null; then
   fail "repository exposes private physical-machine names"
 fi
@@ -498,8 +634,8 @@ fi
 
 [[ ! -d "${REPO_DIR}/formal-methods" ]] || fail \
   "obsolete formal-methods directory still exists"
-[[ ! -d "${REPO_DIR}/host" ]] || fail \
-  "obsolete multi-script host directory still exists"
+[[ -d "${REPO_DIR}/host" ]] || fail \
+  "host-side secure access helper directory is missing"
 [[ ! -d "${REPO_DIR}/toolchain" ]] || fail \
   "obsolete toolchain directory still exists"
 
@@ -536,5 +672,9 @@ PY
 "${SCRIPT_DIR}/mock-swarm-job.sh"
 "${SCRIPT_DIR}/mock-journal.sh"
 "${SCRIPT_DIR}/mock-remove.sh"
+"${SCRIPT_DIR}/mock-host-access.sh"
+"${SCRIPT_DIR}/mock-macos-access.sh"
+"${SCRIPT_DIR}/mock-controller-key.sh"
+"${SCRIPT_DIR}/mock-tailscale-up.sh"
 
 echo "Repository checks passed."

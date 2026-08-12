@@ -106,6 +106,48 @@ sudo apt install --reinstall ubuntu-keyring ca-certificates
 古い keyring が原因になる場合があります。Cache image は、署名済み manifest 検証成功後
 に記録した checksum と一致する場合だけ使います。
 
+## 既存 guest が Ubuntu 24.04
+
+修正版 repository を置いても既存 VM は upgrade されません。信頼する Ubuntu host
+から対象 guest を確認します。
+
+```bash
+kvm-agent-host ssh YOUR_VM_NAME cat /etc/os-release
+```
+
+新しい setup と finalization は Ubuntu 26.04 を要求します。24.04 と表示される場合、
+その VM は旧版で作られています。この使い捨て security boundary では、agent や
+installer の蓄積 state を抱えたまま distribution を in-place upgrade するより、
+確認済み 26.04 image から再構築する方が予測可能です。
+
+まず、残す必要がある source、patch、report その他の作業だけを取り出します。
+
+```bash
+kvm-agent-host pull YOUR_VM_NAME Work/
+```
+
+Helper は結果を `~/vm-extraction-quarantine/YOUR_VM_NAME/` 以下へ置き、実行権限を
+外し、link と特殊 file を拒否します。戻す前に内容を確認してください。Package cache、
+build product、browser profile、provider session、長期 credential は replacement guest
+へコピーせず、確認済み manifest から依存関係を再構築してください。
+
+次に正確な削除範囲を確認します。
+
+```bash
+./remove-kvm-agent.sh --name YOUR_VM_NAME --dry-run
+```
+
+Export と選択名を確認した後にだけ再構築します。
+
+```bash
+./setup-kvm-agent.sh --replace-existing --name YOUR_VM_NAME
+```
+
+`--formal-methods` や `--swarm-role` など replacement に必要な opt-in flag も同じように
+追加します。Command は VM 固有 artifact を表示し、削除前に正確な VM 名の入力を要求
+します。旧 24.04 base image は共有 cache に残る場合がありますが、修正版 setup は
+別名の 26.04 image を使うため、新 guest disk として再利用できません。
+
 ## VM または disk が既に存在
 
 Script は overwrite せず失敗します。

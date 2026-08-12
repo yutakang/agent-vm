@@ -138,12 +138,16 @@ account が完全に攻撃者の制御下にあっても成立します。
 - inbound SSH は通常 libvirt gateway からのみ受け付ける。Opt-in の swarm worker は
   選択した overlay interface 上でも受け付ける。
 - root login と SSH password login を無効にする。
-- SSH agent forwarding と X11 forwarding を無効にする。
+- SSH agent forwarding、X11 forwarding、tunnel、user startup hook、port
+  forwarding を無効にする。Client 発 local forwarding は両端で明示する
+  remote-editor opt-in の場合だけ許可する。
 - Ollama は guest loopback だけで待ち受ける。
 - cloud credential や model weight を自動導入しない。
 
 いずれも host 管理者への強制ではありません。後から `virt-manager` で share、
 device、network、snapshot を追加すれば脅威モデルも変化します。
+`ForwardAgent no`、`ForwardX11 no`、`ClearAllForwardings yes` を明記する理由を含む
+client/server option は[安全なリモートアクセス](docs/remote-access_jp.md)で説明します。
 
 ## GUI 固有のリスク
 

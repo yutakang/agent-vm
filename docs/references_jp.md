@@ -6,7 +6,7 @@
 Installation interface、対応 Ubuntu release、provider route、security behavior は
 変化します。
 
-最終確認: 2026-07-30。
+最終確認: 2026-08-12。
 
 ## Ubuntu、KVM、libvirt、cloud-init
 
@@ -15,11 +15,11 @@ Installation interface、対応 Ubuntu release、provider route、security behav
 - [Ubuntu: Virtual Machine Manager](https://ubuntu.com/server/docs/how-to/virtualisation/virtual-machine-manager/)
 - [Ubuntu: GPU virtualization and graphics concepts](https://ubuntu.com/server/docs/how-to/graphics/gpu-virtualization-with-qemu-kvm/)
 - [Ubuntu released cloud images](https://cloud-images.ubuntu.com/releases/)
-- [Ubuntu 24.04 LTS released cloud image directory](https://cloud-images.ubuntu.com/releases/24.04/release/)
+- [Ubuntu 26.04 LTS released cloud image directory](https://cloud-images.ubuntu.com/releases/26.04/release/)
 - [cloud-init: NoCloud data source](https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html)
 - [cloud-init: users and groups](https://docs.cloud-init.io/en/latest/reference/yaml_examples/user_groups.html)
 - [cloud-init: growpart and resizefs modules](https://docs.cloud-init.io/en/latest/reference/modules.html)
-- [virt-install Ubuntu manpage](https://manpages.ubuntu.com/manpages/noble/man1/virt-install.1.html)
+- [virt-install Ubuntu manpage](https://manpages.ubuntu.com/manpages/resolute/man1/virt-install.1.html)
 
 ## 将来の cloud storage adapter
 

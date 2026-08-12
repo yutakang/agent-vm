@@ -82,79 +82,45 @@ filesystem, so ordinary host-side `cp` cannot read or write files under the
 guest's `/home`. Safer practical choices are:
 
 1. clone a public or narrowly authorized repository inside the guest;
-2. transfer reviewed files with host-initiated `scp`;
+2. transfer reviewed files with the host-side helper;
 3. export a small patch from the guest and review it on the host; or
 4. use a dedicated, short-lived Git branch and scoped token.
 
-The setup script already creates a dedicated recovery key on the host and
-places only its public half in the guest. Prepare reusable shell variables for
-the default VM as follows:
+Setup installs `kvm-agent-host`, which discovers the current VM address and
+uses the dedicated recovery key without exposing it to the guest. For the
+default VM, copy a project from the physical Ubuntu host into the guest:
 
 ```bash
-VM_NAME=kvm-agent
-VM_USER=agent
-KEY_DIR="$HOME/.local/share/kvm-agent/$VM_NAME"
-VM_IP="$(
-  sudo virsh --connect qemu:///system \
-    domifaddr "$VM_NAME" --source lease |
-    awk '$3 == "ipv4" { sub(/\/.*/, "", $4); print $4; exit }'
-)"
-test -n "$VM_IP" || {
-  echo "No guest IPv4 address found; start the VM and try again." >&2
-  exit 1
-}
-test -r "$KEY_DIR/id_ed25519" || {
-  echo "Recovery key not found: $KEY_DIR/id_ed25519" >&2
-  exit 1
-}
-
-SSH_OPTS=(
-  -o BatchMode=yes
-  -o ConnectTimeout=10
-  -o ForwardAgent=no
-  -o IdentitiesOnly=yes
-  -o IdentityAgent=none
-  -o StrictHostKeyChecking=accept-new
-  -o "UserKnownHostsFile=$KEY_DIR/known_hosts"
-  -i "$KEY_DIR/id_ed25519"
-)
+kvm-agent-host push kvm-agent ./my-project Work/
 ```
 
-Copy a project from the host into the guest:
-
-```bash
-scp "${SSH_OPTS[@]}" -r ./my-project \
-  "$VM_USER@$VM_IP:/home/$VM_USER/"
-```
-
-Copy a result from the guest back to a quarantine directory on the host:
-
-```bash
-mkdir -p "$HOME/vm-extraction-quarantine"
-chmod 700 "$HOME/vm-extraction-quarantine"
-
-scp "${SSH_OPTS[@]}" -r \
-  "$VM_USER@$VM_IP:/home/$VM_USER/Work/my-project" \
-  "$HOME/vm-extraction-quarantine/"
-```
-
-Omit `-r` for one file. Initiating both directions from the host means the
-guest never receives the host's private recovery key. Do not copy a host SSH
-private key into the guest or enable SSH-agent forwarding.
-
-Avoid recursive copies of the host home directory. Never copy browser profiles,
-password-manager vaults, cloud configuration directories, signing keys, or
-other long-lived credentials merely for convenience.
-
-For output, a patch is usually easier and safer to inspect than a whole working
-tree. Inside the guest:
+Create a small reviewable patch inside the guest:
 
 ```bash
 git diff --binary > agent-result.patch
 ```
 
-Copy the patch out with `scp`, inspect it in a separate directory, run tests,
-and only then apply or commit it to an important repository. Treat every file
+Then pull it from the trusted host. The default destination is
+`~/vm-extraction-quarantine/kvm-agent/` with mode `0700`:
+
+```bash
+kvm-agent-host pull kvm-agent Work/agent-result.patch
+```
+
+Here `kvm-agent` is the example libvirt VM name; replace it if setup used a
+different `--name`. Both directions begin on the trusted host. Never copy a
+host SSH private key into the guest or enable SSH-agent forwarding.
+
+From a separate trusted Mac, use a different Mac-only key and initiate `scp`
+from the Mac. Follow [Secure remote access](remote-access.md#transfer-data-from-macos)
+instead of copying the host recovery key.
+
+Avoid recursive copies of the host home directory. Never copy browser profiles,
+password-manager vaults, cloud configuration directories, signing keys, or
+other long-lived credentials merely for convenience.
+
+Inspect the patch in a separate directory, run tests, and only then apply or
+commit it to an important repository. Treat every file
 copied from a potentially compromised guest as untrusted; do not execute it,
 build it, or open the directory as an IDE workspace before review.
 
@@ -169,19 +135,17 @@ sudo apt update
 sudo apt install libguestfs-tools
 ```
 
-Then run, for the default disk layout:
+Then run the following example for the default VM name and disk layout:
 
 ```bash
-VM_NAME=kvm-agent
-VM_DISK="/var/lib/libvirt/images/kvm-agent/vms/$VM_NAME.qcow2"
-DEST="$HOME/vm-extraction-quarantine"
-
-sudo virsh --connect qemu:///system domstate "$VM_NAME"
-mkdir -p "$DEST"
-chmod 700 "$DEST"
-sudo guestfish --ro --format=qcow2 -a "$VM_DISK" -i \
-  copy-out /home/agent/Work/my-project "$DEST"
-sudo chown -R "$USER:$USER" "$DEST"
+sudo virsh --connect qemu:///system domstate kvm-agent
+mkdir -p "$HOME/vm-extraction-quarantine/kvm-agent"
+chmod 700 "$HOME/vm-extraction-quarantine/kvm-agent"
+sudo guestfish --ro --format=qcow2 \
+  -a /var/lib/libvirt/images/kvm-agent/vms/kvm-agent.qcow2 -i \
+  copy-out /home/agent/Work/my-project \
+  "$HOME/vm-extraction-quarantine/kvm-agent"
+sudo chown -R "$USER:$USER" "$HOME/vm-extraction-quarantine/kvm-agent"
 ```
 
 Continue only when `domstate` reports `shut off`. Offline extraction is more
@@ -190,13 +154,10 @@ stable filesystem view.
 
 ## Recovery SSH
 
-For the default VM:
+For the default VM, use the installed host helper:
 
 ```bash
-ssh -o ForwardAgent=no \
-  -o IdentitiesOnly=yes \
-  -i ~/.local/share/kvm-agent/kvm-agent/id_ed25519 \
-  agent@VM_ADDRESS
+kvm-agent-host ssh kvm-agent
 ```
 
 Useful checks inside the guest:
@@ -211,8 +172,10 @@ systemctl status gdm3 qemu-guest-agent ollama --no-pager
 ss -ltnp | grep 11434
 ```
 
+The helper pins the guest host key and disables agent, X11, and port forwarding.
 The private recovery key stays on the host. Do not copy it into the guest or
-forward another SSH agent into the VM.
+forward another SSH agent into the VM. See [Secure remote access](remote-access.md)
+for the threat model and macOS controller setup.
 
 ## Updating agent tools
 

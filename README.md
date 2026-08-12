@@ -66,7 +66,7 @@ flowchart TB
     H["Trusted Ubuntu host account"]
     M["virt-manager and system libvirt"]
 
-    subgraph V["Disposable Ubuntu 24.04 desktop VM"]
+    subgraph V["Disposable Ubuntu 26.04 desktop VM"]
         D["GNOME desktop and terminal"]
         A["Codex · Claude Code · OpenCode · Aider"]
         O["Ollama on 127.0.0.1"]
@@ -88,6 +88,23 @@ The GUI does not replace or bypass KVM: `virt-manager` is a graphical client
 for the same system libvirt/KVM boundary. The host account remains trusted and
 can control the VM. Coding agents are never installed on the host.
 
+## Names used in commands
+
+KVM-Agent uses several independent names. In documentation, every `YOUR_...`
+word is a placeholder and every concrete sample name is labelled as an example.
+
+| Name | Example | Used by |
+|---|---|---|
+| Libvirt VM name and guest hostname | `agent-research-a` | `--name`, `virsh`, `kvm-agent-host` |
+| Guest login | `agent` | Linux and OpenSSH |
+| Tailscale device name | `research-a-manager` | MagicDNS and Machines page |
+| Composite Tailscale tag | `tag:swarm-research-a-manager` | Directional grants |
+| Mac SSH alias | `research-a-manager` | `ssh` and `scp` on macOS |
+
+The physical host's informal name is not an argument to `--name`. See
+[Secure remote access](docs/remote-access.md#which-name-means-what) before
+connecting several machines.
+
 ## What the script does
 
 From the ordinary Ubuntu host account, the script:
@@ -96,7 +113,7 @@ From the ordinary Ubuntu host account, the script:
    packages with `sudo`;
 2. adds that host account to the `libvirt` group;
 3. starts libvirt's standard NAT network;
-4. downloads Ubuntu 24.04's released amd64 cloud image and verifies it against
+4. downloads Ubuntu 26.04's released amd64 cloud image and verifies it against
    Ubuntu's GPG-signed SHA-256 manifest;
 5. asks for a local GUI password and creates a dedicated recovery SSH key;
 6. creates a graphical VM with SPICE, virtio video, clipboard integration,
@@ -113,10 +130,13 @@ From the ordinary Ubuntu host account, the script:
    account, plus helpers for safe Tailscale naming, host-key verification,
    fixed SSH/rsync access, and remote-job lifecycle management; Tailscale
    authentication and manager-key authorization remain explicit human steps;
-10. before any vendor installer runs, configures a guest firewall that denies
+10. installs a host-side `kvm-agent-host` helper, a guest controller-key helper,
+   and an OpenSSH baseline that denies password, root, agent, X11, tunnel, and
+   port-forwarding access by default;
+11. before any vendor installer runs, configures a guest firewall that denies
    unsolicited inbound traffic and, by default, outbound traffic to private
    and link-local address ranges, while leaving internet access open; and
-11. verifies each command, keeps Ollama bound to guest loopback
+12. verifies each command, keeps Ollama bound to guest loopback
    (`127.0.0.1:11434`), disables future cloud-init runs, and destroys the
    cloud-init seed once provisioning is done.
 
@@ -143,7 +163,7 @@ The supported primary path is:
 | Component | Supported configuration |
 |---|---|
 | Host | Ubuntu 24.04 or 26.04 LTS, x86-64 |
-| Guest | Ubuntu 24.04 LTS, amd64 |
+| Guest | Ubuntu 26.04 LTS, amd64 |
 | Firmware | Intel VT-x or AMD-V enabled |
 | Host privilege | The invoking account can use `sudo` |
 | Network | Internet access during initial provisioning |
@@ -157,15 +177,46 @@ CPUs, capped at 16. Thus a 16 GiB/8-thread host normally gives the guest about
 12 GiB and 6 vCPUs, while a 64 GiB/32-thread host gives it 32 GiB and 16
 vCPUs. Explicit `--memory` and `--vcpus` values still override these defaults.
 
+## Guest release guarantee
+
+New VMs are built from Ubuntu's released `ubuntu-26.04-server-cloudimg-amd64.img`.
+The setup verifies the signed image manifest, passes `26.04` into early guest
+provisioning, reads `/etc/os-release` again over the managed recovery channel,
+and refuses final cleanup if the guest does not report Ubuntu 26.04. The
+verified release is also recorded in
+`/var/lib/kvm-agent/installed-versions.txt`.
+
+Some Ubuntu 24.04 hosts have a `libosinfo` database that predates the
+`ubuntu26.04` identifier. In that case the script clearly reports that it is
+using `ubuntu24.04` only as compatible **virtual-hardware metadata** for
+`virt-install`. This does not select or install Ubuntu 24.04: the disk URL,
+signed checksum, early guest check, and final guest check all remain pinned to
+26.04.
+
+Updating this repository does not change an already-created VM. Check an
+existing guest from the trusted Ubuntu host with:
+
+```bash
+kvm-agent-host ssh YOUR_VM_NAME cat /etc/os-release
+```
+
+If it reports 24.04, copy the work you intend to keep out of the VM and review
+it before using `--replace-existing`, which deliberately deletes and recreates
+the selected guest. Follow the guarded migration procedure in
+[Troubleshooting](docs/troubleshooting.md#an-existing-guest-is-ubuntu-2404).
+
 ## Quick start
 
 Download or clone this repository, then run:
 
 ```bash
-cd kvm-agent
+cd YOUR_AGENT_VM_DIRECTORY
 chmod +x setup-kvm-agent.sh
 ./setup-kvm-agent.sh
 ```
+
+`YOUR_AGENT_VM_DIRECTORY` is a placeholder. A Git clone is normally named
+`agent-vm`; a downloaded ZIP may extract as `agent-vm-main`.
 
 Do **not** run `sudo ./setup-kvm-agent.sh`. Run it as the host account that will
 use `virt-manager`; the script invokes `sudo` only for the operations that need
@@ -222,7 +273,8 @@ scope, editor behavior, and update model.
 ## Options
 
 ```text
---name NAME        VM and host name (default: kvm-agent)
+--name NAME        Libvirt VM name and guest Linux hostname
+                   (default for new VMs only: kvm-agent)
 --user NAME        Guest login name (default: agent)
 --memory MB        Guest RAM in MiB
 --vcpus NUMBER     Guest virtual CPUs
@@ -233,10 +285,14 @@ scope, editor behavior, and update model.
                    traffic. Only for an internal mirror or model endpoint
 --formal-methods   Add Lean, Isabelle/HOL, Haskell tooling, VS Code, and the
                    official Lean/Haskell extensions inside the guest
+--allow-remote-editor
+                   Opt in to client-initiated local SSH forwarding for a
+                   remote editor; agent and X11 forwarding stay disabled
 --swarm-role ROLE  Prepare the guest as "manager", "worker", or "both"
 --swarm-network N  Use "tailscale" (default) or "wireguard" for swarm traffic
 --add-swarm ROLE   Add a swarm role to an already-provisioned managed VM
 --add-journal      Add automatic research journals to an existing managed VM
+--harden-existing  Reapply the current SSH baseline to a named existing VM
 --journal-project P
                    Initialize guest-side Git project P; may be repeated
 --journal-backend B
@@ -245,7 +301,7 @@ scope, editor behavior, and update model.
                    Consent to sending bounded project metadata to the selected
                    claude/codex provider; required for either remote backend
 --journal-timezone Z
-                   Use IANA timezone Z (default: Europe/Prague)
+                   Use IANA timezone Z (default: Etc/UTC)
 --resize-existing  Change persistent RAM and/or vCPU allocation of a powered-
                    off existing VM without deleting it
 --replace-existing Remove the selected existing VM after exact-name
@@ -340,10 +396,11 @@ To retrofit an already-provisioned, running VM from its physical host:
 ./setup-kvm-agent.sh \
   --add-journal \
   --name kvm-agent \
-  --journal-project /home/agent/PSL_Neural
+  --journal-project /home/agent/YOUR_PROJECT
 ```
 
-The project path is inside the guest. Repeat `--journal-project` for multiple
+`YOUR_PROJECT` is a placeholder, and the path is inside the guest. Repeat
+`--journal-project` for multiple
 repositories in the same VM. This operation does not rebuild the guest. It
 adds agent-neutral event instructions, canonical JSON plus static HTML
 reports, and persistent 07:00 daily, Saturday weekly, and first-of-month
@@ -418,68 +475,29 @@ and data transfer.
 
 ### Transfer files between the host and guest
 
-The locally hosted VM still has its own filesystem. An ordinary host-side `cp`
-cannot see `/home/agent` inside the guest, and KVM-Agent deliberately creates no
-shared host directory. Use host-initiated `scp` over libvirt's private network
-for routine transfers while the VM is running.
-
-Setup already creates a dedicated recovery key on the host and installs only its
-public half in the guest. For the default VM and user, prepare the current
-address and SSH options on the host as follows:
+The VM has a separate filesystem and no shared host directory. Setup installs a
+host helper with the recovery key, current-address discovery, host-key pinning,
+and all forwarding disabled. On the physical Ubuntu host, send a project with:
 
 ```bash
-VM_NAME=kvm-agent
-VM_USER=agent
-KEY_DIR="$HOME/.local/share/kvm-agent/$VM_NAME"
-VM_IP="$(
-  sudo virsh --connect qemu:///system \
-    domifaddr "$VM_NAME" --source lease |
-    awk '$3 == "ipv4" { sub(/\/.*/, "", $4); print $4; exit }'
-)"
-test -n "$VM_IP" || {
-  echo "No guest IPv4 address found; start the VM and try again." >&2
-  exit 1
-}
-
-test -r "$KEY_DIR/id_ed25519" || {
-  echo "Recovery key not found: $KEY_DIR/id_ed25519" >&2
-  exit 1
-}
-
-SSH_OPTS=(
-  -o BatchMode=yes
-  -o ConnectTimeout=10
-  -o ForwardAgent=no
-  -o IdentitiesOnly=yes
-  -o IdentityAgent=none
-  -o StrictHostKeyChecking=accept-new
-  -o "UserKnownHostsFile=$KEY_DIR/known_hosts"
-  -i "$KEY_DIR/id_ed25519"
-)
+kvm-agent-host push kvm-agent ./my-project Work/
 ```
 
-Copy a file or directory **from the host into the guest**:
+Pull a result into the automatically created quarantine directory:
 
 ```bash
-scp "${SSH_OPTS[@]}" -r ./my-project \
-  "$VM_USER@$VM_IP:/home/$VM_USER/"
+kvm-agent-host pull kvm-agent Work/agent-result.patch
 ```
 
-Copy a file or directory **from the guest back to the host**, initiating the
-operation from the host:
+Replace `kvm-agent` with the real libvirt VM name. The helper initiates both
+directions from the trusted host; never copy its private recovery key into the
+guest or enable SSH-agent forwarding. Pulls strip executable permission and
+refuse device, special, and symbolic-link entries before placing data
+in quarantine.
 
-```bash
-mkdir -p "$HOME/vm-extraction-quarantine"
-chmod 700 "$HOME/vm-extraction-quarantine"
-
-scp "${SSH_OPTS[@]}" -r \
-  "$VM_USER@$VM_IP:/home/$VM_USER/Work/my-project" \
-  "$HOME/vm-extraction-quarantine/"
-```
-
-Omit `-r` for one file. Change `VM_NAME` and `VM_USER` if setup used non-default
-values. The private recovery key must remain on the host; never copy it into the
-guest or enable SSH-agent forwarding.
+For a separate trusted Mac, including a hardened `~/.ssh/config`, dedicated
+key, Tailscale roles, and Mac-initiated `scp`, follow
+[Secure access from an Ubuntu host or macOS controller](docs/remote-access.md).
 
 Treat anything copied out of a potentially compromised guest as untrusted.
 Review it in a quarantine directory before executing it, building it, opening
@@ -527,6 +545,7 @@ long-lived keys, production data, or expensive API credentials.
 - [Security policy and threat model](SECURITY.md)
 - [Design and trust boundaries](docs/design.md)
 - [Daily operation](docs/daily-use.md)
+- [Secure access from an Ubuntu host or macOS controller](docs/remote-access.md)
 - [Credential handling](docs/credentials.md)
 - [Agent tools and model services](docs/agent-tools-and-model-services.md)
 - [Reduced formal-methods environment](docs/formal-methods.md)
