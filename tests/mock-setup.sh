@@ -300,9 +300,9 @@ EOF
 cat > "$TEMP_DIR/bin/virt-install" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$*" == "--osinfo list" ]]; then
-  printf '%s\n' ubuntu24.04
+  printf '%s\n' 'ubuntu-lts-latest, ubuntu24.04, ubuntunoble'
   if [[ "${MOCK_OSINFO_26_AVAILABLE:-yes}" == "yes" ]]; then
-    printf '%s\n' ubuntu26.04
+    printf '%s\n' 'ubuntu26.04, ubunturesolute'
   fi
   exit 0
 fi

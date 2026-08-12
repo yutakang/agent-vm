@@ -178,7 +178,13 @@ osinfo_short_id_available() {
 
   LC_ALL=C virt-install --osinfo list 2>/dev/null \
     | awk -v wanted="$wanted" '
-        $1 == wanted { found = 1 }
+        {
+          for (i = 1; i <= NF; i++) {
+            candidate = $i
+            gsub(/,/, "", candidate)
+            if (candidate == wanted) found = 1
+          }
+        }
         END { exit(found ? 0 : 1) }
       '
 }
