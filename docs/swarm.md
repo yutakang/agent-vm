@@ -30,20 +30,21 @@ For Mac access and the roles of Tailscale versus SSH keys, first read
 
 ## Names and command locations
 
-These are different identifiers:
+These identifiers serve different purposes. Keep machine identity stable by
+using one unique VM name for libvirt, the guest hostname, Tailscale, and the
+Mac SSH alias. Keep the swarm group in the tag/policy layer.
 
-| Identifier | Placeholder | Explicit example |
+| Identifier | Placeholder | Recommended example |
 |---|---|---|
-| Manager libvirt VM name | `YOUR_MANAGER_LIBVIRT_VM_NAME` | `agent-research-a-manager` |
-| Worker libvirt VM name | `YOUR_WORKER_LIBVIRT_VM_NAME` | `agent-research-a-worker` |
+| Manager VM/libvirt/hostname/Tailscale name | `YOUR_MANAGER_LIBVIRT_VM_NAME` | `vm-manager-01` |
+| Worker VM/libvirt/hostname/Tailscale name | `YOUR_WORKER_LIBVIRT_VM_NAME` | `vm-worker-01` |
 | Swarm group | `YOUR_SWARM_GROUP` | `research-a` |
-| Manager Tailscale name | derived as `GROUP-manager` | `research-a-manager` |
-| Worker Tailscale name | derived as `GROUP-worker` | `research-a-worker` |
 | Manager tag | derived as `tag:swarm-GROUP-manager` | `tag:swarm-research-a-manager` |
 | Worker tag | derived as `tag:swarm-GROUP-worker` | `tag:swarm-research-a-worker` |
 
-`--name` always means the libvirt VM name and guest Linux hostname. A swarm
-role does not rename the VM.
+`--name` during VM setup sets the libvirt VM name and guest Linux hostname. A
+swarm role does not rename the VM. When joining Tailscale, pass that same guest
+hostname explicitly so the Tailscale device name stays identical.
 
 | Where to run | Purpose | Commands |
 |---|---|---|
@@ -112,24 +113,34 @@ For one group, keep only that group's entries. Remove or narrow any existing
 allow-all rule, merge unrelated necessary rules carefully, and save only when
 the policy tests pass.
 
-### 3. Join each guest with the same group name
+### 3. Join each guest with the same group and its existing VM name
 
 Inside the manager VM:
 
 ```bash
-kvm-agent-swarm-tailscale-up --group YOUR_SWARM_GROUP
+kvm-agent-swarm-tailscale-up \
+  --group YOUR_SWARM_GROUP \
+  --name "$(hostname)"
 ```
 
 Inside the worker VM:
 
 ```bash
-kvm-agent-swarm-tailscale-up --group YOUR_SWARM_GROUP
+kvm-agent-swarm-tailscale-up \
+  --group YOUR_SWARM_GROUP \
+  --name "$(hostname)"
 ```
 
-The helper derives the device name and a single composite role tag, then runs
-`tailscale up` with a reset configuration, subnet routes rejected, no exit
-node, and Tailscale SSH disabled. Complete the browser authentication for the
-intended tailnet. The physical hosts are not enrolled.
+The explicit `--name "$(hostname)"` keeps the Tailscale device name identical
+to the VM/libvirt/guest name. The helper derives the single composite role tag
+from the group, then runs `tailscale up` with a reset configuration, subnet
+routes rejected, no exit node, and Tailscale SSH disabled. Complete the browser
+authentication for the intended tailnet. The physical hosts are not enrolled.
+
+For compatibility, omitting `--name` is still supported; in that case the
+helper derives a device name such as `research-a-manager`. That is convenient
+for quick swarm-only deployments, but using the existing unique VM name is the
+recommended convention for machines you operate directly.
 
 Verify in both VMs:
 
@@ -186,8 +197,8 @@ kvm-agent-swarm-configure-worker \
   SHA256:PASTE_THE_WORKER_HOST_FINGERPRINT
 ```
 
-For group `research-a`, the example worker name is `research-a-worker`. The
-helper refuses a fingerprint mismatch and creates a dedicated SSH config using
+For a worker named `vm-worker-01`, use `vm-worker-01` here as well. The helper
+refuses a fingerprint mismatch and creates a dedicated SSH config using
 the `agent-worker` account, the guest-local key, `ForwardAgent no`,
 `ForwardX11 no`, and `StrictHostKeyChecking yes`.
 

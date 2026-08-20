@@ -6,7 +6,7 @@ This project links primary upstream documentation rather than treating its own
 summary as permanent truth. Installation interfaces, supported Ubuntu releases,
 provider routes, and security behavior can change.
 
-Last reviewed: 2026-08-12.
+Last reviewed: 2026-08-19.
 
 ## Ubuntu, KVM, libvirt, and cloud-init
 
@@ -41,6 +41,25 @@ KVM/libvirt guests and does not create AWS or Sakura resources.
 
 These are the installation origins used by `setup-kvm-agent.sh`. The script
 downloads them from inside the guest.
+
+## GitHub repository and agent workflow
+
+- [GitHub CLI: official Linux installation](https://github.com/cli/cli/blob/trunk/docs/install_linux.md)
+- [GitHub CLI environment variables](https://cli.github.com/manual/gh_help_environment)
+- [GitHub's SSH key fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
+- [GitHub: managing deploy keys](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys)
+- [GitHub: managing fine-grained personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+- [GitHub: permissions for fine-grained personal access tokens](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)
+- [GitHub: creating a repository ruleset](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository)
+- [GitHub: available rules for rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)
+- [GitHub: pull-request REST endpoints](https://docs.github.com/en/rest/pulls/pulls)
+- [GitHub: about Copilot cloud agent](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-cloud-agent)
+- [GitHub: configure cloud-agent secrets and variables](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-cloud-agent/configure-secrets-and-variables)
+
+The local-VM workflow uses a repository deploy key for Git transport and a
+separate fine-grained token for issue/PR API access. GitHub-hosted Copilot cloud
+agent is optional and uses a separate environment and entitlement. See
+[GitHub integration](github-integration.md).
 
 ## Optional formal-methods and editor environment
 

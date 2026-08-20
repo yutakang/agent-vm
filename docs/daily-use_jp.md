@@ -18,6 +18,100 @@ desktop から ACPI shutdown してください。`Force Off` は物理 machine 
 Script は VM autostart を有効にしません。Host 起動時に常に guest の memory 消費と
 network service 公開を行う必要がある場合だけ、`virt-manager` で有効にしてください。
 
+## 長時間の作業を `tmux` で維持する
+
+KVM-Agent は guest に `tmux` を導入します。Coding agent、proof search、build など、
+Mac の sleep、Wi-Fi 切替、Tailscale reconnect、SSH 切断が起きても継続させたい処理は
+`tmux` 内で実行してください。
+
+日常運用では、一つの名前付き session だけでも十分です。
+
+```bash
+tmux new -As work
+```
+
+既存の `work` session があれば attach し、なければ新規作成します。その中で Claude Code、
+Codex、OpenCode、Isabelle job など長時間 command を起動します。
+
+よく使う操作:
+
+```text
+Ctrl-b d       detach。処理は継続する
+Ctrl-b c       新しい window を作る
+Ctrl-b n       次の window
+Ctrl-b p       前の window
+Ctrl-b ,       現在の window を rename
+Ctrl-b [       scroll/copy mode。q で戻る
+```
+
+新しい SSH 接続から戻る場合:
+
+```bash
+tmux ls
+tmux attach -t work
+```
+
+`tmux` は terminal・SSH 切断から process を守りますが、VM の shutdown/reboot を越えて
+process を維持するものではなく、security boundary でもありません。
+
+## 一つの GitHub issue を一つの agent branch で処理する
+
+GitHub-connected project では agent に `main` を編集させず、protected-default-branch
+routine を使います。
+
+1. Acceptance criteria と test command を持つ bounded GitHub issue を書く。
+2. Repository 内で agent を開始し issue number を渡す。
+3. `origin/main` へ update して `agent/...` branch を作らせる。
+4. Edit、test、commit、branch push、`Closes #ISSUE` を含む `gh pr create` を行わせる。
+5. GitHub で diff、check、discussion、dependency provenance、submodule commit を確認する。
+6. 自分で protected `main` へ merge し、VM checkout を fast-forward する。
+
+GitHub issue は local CLI agent を自動起動しません。Human が project-scoped credential
+を load した状態で agent を開始すれば、agent は branch push と PR 作成を実行できます。
+Agent を ruleset bypass list に入れず、API token に Contents write を付与しません。
+
+初回 setup、正確な credential 分離、現在の fine-grained-token UI、command、failure
+recovery は
+[local coding-agent VM の GitHub integration](github-integration_jp.md)に記載しています。
+
+## SSH 切断後に terminal が文字化け・異常表示になった場合
+
+Full-screen の interactive program 実行中に SSH が切れると、入力文字が表示されない、
+改行がおかしい、画面が意味不明な文字列に見える、といった terminal state の乱れが
+残ることがあります。
+
+まだ foreground program が動いているなら、まず次を試します。
+
+```text
+Ctrl-C
+```
+
+SSH がすでに切れ、local shell（たとえば Mac の terminal）へ戻っている場合は、**今いる
+側の terminal** で次を実行します。
+
+```bash
+reset
+```
+
+入力した文字自体が見えなくても、`reset` と入力して Enter を押してください。それでも
+直らなければ:
+
+```bash
+stty sane
+reset
+```
+
+その後 VM へ再接続し、既存 `tmux` session に戻ります。
+
+```bash
+ssh YOUR_VM_NAME
+tmux attach -t work
+```
+
+SSH 接続自体は生きていて remote shell の表示だけが壊れている場合も、その shell で
+`Ctrl-C` → `reset` を試せます。Terminal state を直すだけのために VM を reboot する
+必要はありません。
+
 ## 再作成せず既存 VM の resource を変更する
 
 Guest を通常どおり shutdown し、host から永続 RAM・vCPU 割当を変更します。

@@ -233,6 +233,40 @@ ssh-keygen -R VM_ADDRESS \
 
 Never disable host-key checking globally.
 
+## The terminal is garbled after SSH is interrupted
+
+An interrupted interactive or full-screen SSH session can leave the terminal
+with broken echo, line handling, or display state. This is usually a terminal
+state problem, not VM corruption.
+
+If a foreground program is still active, press `Ctrl-C` once. If SSH has
+already dropped and you are back at the local shell (for example on macOS),
+type the following there even if the characters do not display correctly:
+
+```bash
+reset
+```
+
+If that is not enough:
+
+```bash
+stty sane
+reset
+```
+
+Then reconnect. If the long-running command was started inside `tmux`, resume
+it rather than restarting it:
+
+```bash
+ssh YOUR_VM_NAME
+tmux attach -t work
+```
+
+If SSH is still connected but only the remote shell is garbled, run the same
+`Ctrl-C` then `reset` sequence in that shell. See
+[Daily operation](daily-use.md#recover-a-garbled-terminal-after-an-interrupted-ssh-session)
+for the recommended `tmux` workflow that makes dropped SSH sessions routine.
+
 ## Setup says it could not verify the qcow2 virtual size
 
 Version 11 resized the image correctly but extracted `virtual-size` with a
@@ -517,3 +551,33 @@ copy-on-write filesystems, and layered storage it cannot guarantee the old
 blocks are gone. Treat the guest password as disclosed to anyone who held root
 on the host while the seed existed, and choose a password you do not use
 elsewhere.
+
+## GitHub integration behaves unexpectedly
+
+Three messages commonly look like failures but describe different states:
+
+- `You've successfully authenticated, but GitHub does not provide shell access`
+  from `ssh -T` is success. Confirm that the greeting names the intended
+  repository.
+- **Compare & pull request** means a feature branch was pushed but no pull
+  request exists yet. The local agent can run `gh pr create`; the human does
+  not have to click the banner.
+- a rejected direct push to `main` is the intended ruleset behavior. Push an
+  `agent/...` branch and create a PR instead.
+
+If `gh issue view` reports that Projects Classic or `projectCards` is
+deprecated, the Ubuntu-packaged GitHub CLI is too old for the current GitHub
+API. Install or update `gh` from GitHub's official APT repository. Until then,
+request only explicit data fields:
+
+```bash
+gh issue view ISSUE --repo OWNER/REPOSITORY \
+  --json number,title,body,url
+```
+
+If `gh` works in a terminal but not in a coding agent, restart that agent after
+loading the project's token. Environment variables are inherited at process
+start and an earlier process does not see a later `export`.
+
+Follow [GitHub integration](github-integration.md) for the full credential,
+ruleset, CLI installation, issue-to-PR, and revocation procedure.

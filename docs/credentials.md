@@ -31,8 +31,8 @@ updates or plugins can introduce new code.
 |---|---|
 | OpenAI or Anthropic interactive login | Complete the provider's first-run flow in the guest. Use MFA/passkeys from a separate trusted device where possible. Sign out before discarding or sharing the VM. |
 | API key | Prefer project-specific, short-lived, revocable keys with spending limits. Store only in the guest that needs it. |
-| Git hosting token | Use repository-scoped read/write access, not organization administration. Prefer a temporary branch or fork. |
-| SSH key for source hosting | Generate it inside the guest for that project. Never copy the host's general-purpose private key into the VM. |
+| Git hosting API token | Use a fine-grained, repository-selected token with only the issue/PR permissions needed. Keep Contents read-only when Git pushes use a separate deploy key. |
+| SSH key for source hosting | Generate it inside the guest for that repository. Prefer a repository deploy key, never the host's general-purpose private key. |
 | Commit-signing key | Sign reviewed commits on a trusted workstation or use a narrowly scoped guest key. Do not import a high-value personal signing key. |
 | Cloud administrator credential | Do not place it in an autonomous-agent guest. Create a narrowly scoped workload identity instead. |
 | Ollama Cloud login | Treat it as a remote-provider credential; local CLI execution does not make inference local. |
@@ -44,15 +44,29 @@ Environment variables are convenient, but agents commonly inspect process
 environments, shell files, logs, and project configuration. Do not export a
 broad credential globally if one command or one project alone needs it.
 
-Prefer provider credential stores or a shell wrapper with a restricted file:
+Prefer provider credential stores or a shell wrapper with a restricted file.
+The following commands create a private directory and an empty file, then open
+that file in an editor:
 
 ```bash
-install -m 0600 /dev/null ~/.config/project-agent.env
+mkdir -p ~/.config/project-agent
+chmod 700 ~/.config/project-agent
+touch ~/.config/project-agent/credentials.env
+chmod 600 ~/.config/project-agent/credentials.env
+nano ~/.config/project-agent/credentials.env
 ```
 
-Edit the file manually inside the guest, load it only for the required command,
-and ensure it is ignored by Git. Do not put secrets directly in command-line
-arguments: they can appear in shell history and process listings.
+`touch` creates the empty file if it does not exist; it does not install
+software. Edit the file manually inside the guest, load it only for the required
+command, and ensure it is ignored by Git. Do not put secrets directly in
+command-line arguments: they can appear in shell history and process listings.
+
+For a dedicated one-project VM, loading one narrowly scoped token from a mode
+`600` file in `~/.bashrc` can be a reasonable convenience. It gives every
+interactive shell and every agent started from it that token, so do not use this
+pattern in a mixed-client or mixed-project VM. The concrete GitHub pattern and
+its split deploy-key/API-token authority are documented in
+[GitHub integration](github-integration.md).
 
 Guest file permissions limit accidental access between Unix accounts; they do
 not stop an agent running as the same `agent` user or with guest sudo.
@@ -106,7 +120,9 @@ bad changes. Use provider-side controls:
 - rapid revocation from a separate trusted device.
 
 The narrowest safe default is often read-only repository access plus patch
-export. Grant write access only when it materially improves the workflow.
+export. When direct agent branch pushes materially improve the workflow, use a
+repository-only deploy key, protect `main`, and keep merge authority with the
+human reviewer. Grant broader write access only when it has a specific use.
 
 ## Snapshots and cloning
 

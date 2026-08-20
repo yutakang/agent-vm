@@ -7,9 +7,9 @@ This guide covers two different trusted devices:
 - the **physical Ubuntu host** that runs libvirt and the VM; and
 - a separate **trusted Mac** that reaches an agent VM through Tailscale.
 
-All words written as `YOUR_...` are placeholders. Replace them. Names written
-as `research-a-manager` are explicitly labelled examples and are not required
-names.
+All words written as `YOUR_...` are placeholders. Replace them. For normal
+operation, choose one globally unique VM name and reuse it for the libvirt
+domain, guest hostname, Tailscale device, and Mac SSH alias.
 
 ## The short, safe path
 
@@ -35,7 +35,7 @@ For a trusted Mac:
 2. On the Mac, from this repository, run:
 
    ```bash
-   ./macos/setup-secure-access.sh YOUR_VM_TAILSCALE_NAME
+   ./macos/setup-secure-access.sh YOUR_VM_NAME
    ```
 
 3. The command prints one `kvm-agent-authorize-controller-key ...` command.
@@ -43,7 +43,7 @@ For a trusted Mac:
 4. On the Mac, connect with:
 
    ```bash
-   ssh YOUR_VM_TAILSCALE_NAME
+   ssh YOUR_VM_NAME
    ```
 
 5. Before relying on the connection, complete the directional Tailscale policy
@@ -54,21 +54,25 @@ Only the public key is copied into the VM.
 
 ## Which name means what?
 
-These identifiers belong to different systems. They may be similar, but they
-are not interchangeable.
+These identifiers belong to different systems, but KVM-Agent recommends
+deliberately giving the same machine identity to all four user-visible VM
+names. This makes `virsh`, Tailscale, and `ssh` agree about which VM you mean.
 
-| Identifier | Used where | Explicit example |
+| Identifier | Used where | Recommended example |
 |---|---|---|
 | Physical-host label | Your notes only | `ThinkPad host` |
-| Libvirt VM name | `--name`, `virsh`, `kvm-agent-host` | `agent-research-a` |
-| Guest Linux hostname | Inside the VM | `agent-research-a` |
+| Libvirt VM name | `--name`, `virsh`, `kvm-agent-host` | `vm-workstation-01` |
+| Guest Linux hostname | Inside the VM | `vm-workstation-01` |
+| Tailscale device name | Machines page and MagicDNS | `vm-workstation-01` |
+| Mac SSH alias | `ssh ALIAS`; normally same as MagicDNS | `vm-workstation-01` |
 | Guest login | SSH/Linux account | `agent` |
-| Tailscale device name | Machines page and MagicDNS | `research-a-manager` |
-| Composite Tailscale tag | Tailnet access policy | `tag:swarm-research-a-manager` |
-| Mac SSH alias | `ssh ALIAS`; normally same as MagicDNS | `research-a-manager` |
+| Tailscale tag | Tailnet access policy | `tag:development` or `tag:swarm-research-a-manager` |
 
-`--name` means the **libvirt domain name and guest Linux hostname**. It does not
-name the physical host. A swarm role also does not rename the VM.
+`--name` sets the **libvirt domain name and guest Linux hostname**. When joining
+Tailscale, explicitly reuse that name with `--name`; on the Mac, use the same
+name as the default SSH alias. The physical host's label and Tailscale tags are
+different concepts: tags describe security role/group and should not be used
+as machine identity.
 
 To find existing libvirt names, run this on the physical Ubuntu host:
 
@@ -137,13 +141,13 @@ Do not copy the recovery private key from
 On the Mac, run:
 
 ```bash
-./macos/setup-secure-access.sh YOUR_VM_TAILSCALE_NAME
+./macos/setup-secure-access.sh YOUR_VM_NAME
 ```
 
 For a non-default guest user or a separate local alias:
 
 ```bash
-./macos/setup-secure-access.sh YOUR_VM_TAILSCALE_NAME \
+./macos/setup-secure-access.sh YOUR_VM_NAME \
   --alias YOUR_LOCAL_SSH_ALIAS \
   --user YOUR_GUEST_USER
 ```
@@ -312,12 +316,12 @@ On the physical Ubuntu host:
 On the Mac, create a separate alias:
 
 ```bash
-./macos/setup-secure-access.sh YOUR_VM_TAILSCALE_NAME \
+./macos/setup-secure-access.sh YOUR_VM_NAME \
   --add-remote-editor-alias
 ```
 
 Then use the printed `--allow-port-forwarding` authorization command inside
-the VM and point the editor at `YOUR_VM_TAILSCALE_NAME-editor`. The ordinary
+the VM and point the editor at `YOUR_VM_NAME-editor`. The ordinary
 shell alias remains hardened with `ClearAllForwardings yes`. Agent and X11
 forwarding remain disabled for both aliases.
 

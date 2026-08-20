@@ -6,7 +6,7 @@
 Installation interface、対応 Ubuntu release、provider route、security behavior は
 変化します。
 
-最終確認: 2026-08-12。
+最終確認: 2026-08-19。
 
 ## Ubuntu、KVM、libvirt、cloud-init
 
@@ -41,6 +41,25 @@ Installation interface、対応 Ubuntu release、provider route、security behav
 
 これらが `setup-kvm-agent.sh` の installation origin です。Script は guest 内から
 download します。
+
+## GitHub repository・agent workflow
+
+- [GitHub CLI: 公式 Linux installation](https://github.com/cli/cli/blob/trunk/docs/install_linux.md)
+- [GitHub CLI environment variable](https://cli.github.com/manual/gh_help_environment)
+- [GitHub の SSH key fingerprint](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
+- [GitHub: deploy key の管理](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys)
+- [GitHub: fine-grained personal access token の管理](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+- [GitHub: fine-grained personal access token の permission](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)
+- [GitHub: repository ruleset の作成](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository)
+- [GitHub: ruleset で利用可能な rule](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)
+- [GitHub: pull-request REST endpoint](https://docs.github.com/en/rest/pulls/pulls)
+- [GitHub: Copilot cloud agent について](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-cloud-agent)
+- [GitHub: cloud-agent secret・variable 設定](https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/customize-cloud-agent/configure-secrets-and-variables)
+
+Local-VM workflow は Git transport に repository deploy key、issue/PR API access に別の
+fine-grained token を使います。GitHub-hosted Copilot cloud agent は任意であり、別の
+environment・entitlement を使います。[GitHub integration](github-integration_jp.md)も
+参照してください。
 
 ## 任意の形式手法・editor 環境
 

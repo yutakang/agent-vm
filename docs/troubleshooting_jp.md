@@ -220,6 +220,39 @@ ssh-keygen -R VM_ADDRESS \
 
 Global に host-key checking を無効化してはいけません。
 
+## SSH 切断後に terminal が文字化け・異常表示になる
+
+Interactive/full-screen program 実行中に SSH が切れると、入力 echo、改行、表示などの
+terminal state が壊れて見えることがあります。通常これは VM の破損ではなく terminal
+state の問題です。
+
+Foreground program がまだ動いている場合は `Ctrl-C` を一度押します。SSH がすでに
+切れて local shell（たとえば macOS）へ戻っている場合は、文字が正しく表示されなくても
+その shell で次を入力して Enter を押します。
+
+```bash
+reset
+```
+
+まだ直らなければ:
+
+```bash
+stty sane
+reset
+```
+
+その後 SSH へ再接続します。長時間 command を `tmux` 内で起動していた場合は再実行せず、
+既存 session に戻ります。
+
+```bash
+ssh YOUR_VM_NAME
+tmux attach -t work
+```
+
+SSH 自体は接続中で remote shell の表示だけが壊れている場合も、その shell で
+`Ctrl-C` → `reset` を試します。SSH 切断を日常的な事象として扱える `tmux` workflow は
+[日常運用](daily-use_jp.md#ssh-切断後に-terminal-が文字化け異常表示になった場合)を参照してください。
+
 ## qcow2 virtual size を検証できないと表示される
 
 Version 11 は image 自体を正常に拡張していても、`qemu-img` の
@@ -488,3 +521,31 @@ Remote check が応答しなくなった場合、その SSH 呼び出しだけ�
 copy-on-write filesystem、階層化された storage では、古い block が消えたことを保証
 できません。seed が存在した間に host の root 権限を持っていた者にはゲストパスワード
 が開示されたものとみなし、他で使い回していないパスワードを選んでください。
+
+## GitHub integration が予想と違う
+
+次の三 message は failure に見えますが、別々の正常状態を表すことがあります。
+
+- `ssh -T` の `You've successfully authenticated, but GitHub does not provide
+  shell access` は success。Greeting が目的の repository 名を示すか確認します。
+- **Compare & pull request** は feature branch が push 済みで PR がまだないという意味。
+  Local agent が `gh pr create` を実行でき、human が banner を click する必要はありません。
+- `main` への direct push rejection は ruleset の意図どおりです。代わりに
+  `agent/...` branch を push して PR を作ります。
+
+`gh issue view` が Projects Classic または `projectCards` deprecated error を出すなら、
+Ubuntu package の GitHub CLI が current GitHub API に対して古すぎます。GitHub の公式
+APT repository から `gh` を install/update します。それまでの間は明示 field だけを
+request できます。
+
+```bash
+gh issue view ISSUE --repo OWNER/REPOSITORY \
+  --json number,title,body,url
+```
+
+Terminal では `gh` が動くのに coding agent では動かない場合、project token を load
+してから agent を再起動します。Environment variable は process start 時に継承され、
+既存 process は後の `export` を受け取りません。
+
+Credential、ruleset、CLI install、issue-to-PR、revocation の全手順は
+[GitHub integration](github-integration_jp.md)に従ってください。

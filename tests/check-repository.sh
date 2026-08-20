@@ -210,6 +210,7 @@ for required in \
     DISCLAIMER.md DISCLAIMER_jp.md \
     docs/design.md docs/design_jp.md \
     docs/daily-use.md docs/daily-use_jp.md \
+    docs/github-integration.md docs/github-integration_jp.md \
     docs/remote-access.md docs/remote-access_jp.md \
     docs/credentials.md docs/credentials_jp.md \
     docs/agent-tools-and-model-services.md \
@@ -220,6 +221,78 @@ for required in \
     docs/troubleshooting.md docs/troubleshooting_jp.md \
     docs/references.md docs/references_jp.md; do
   [[ -s "${REPO_DIR}/${required}" ]] || fail "missing or empty: $required"
+done
+
+# Keep the README documentation indexes complete. A dedicated guide should not
+# become effectively hidden just because a new file was added under docs/.
+for doc in \
+    docs/design.md \
+    docs/daily-use.md \
+    docs/github-integration.md \
+    docs/remote-access.md \
+    docs/credentials.md \
+    docs/agent-tools-and-model-services.md \
+    docs/formal-methods.md \
+    docs/swarm.md \
+    docs/journal.md \
+    docs/troubleshooting.md \
+    docs/references.md; do
+  grep -Fq -- "($doc)" "${REPO_DIR}/README.md" \
+    || fail "README documentation index omits: $doc"
+done
+for doc in \
+    docs/design_jp.md \
+    docs/daily-use_jp.md \
+    docs/github-integration_jp.md \
+    docs/remote-access_jp.md \
+    docs/credentials_jp.md \
+    docs/agent-tools-and-model-services_jp.md \
+    docs/formal-methods_jp.md \
+    docs/swarm_jp.md \
+    docs/journal_jp.md \
+    docs/troubleshooting_jp.md \
+    docs/references_jp.md; do
+  grep -Fq -- "($doc)" "${REPO_DIR}/README_jp.md" \
+    || fail "Japanese README documentation index omits: $doc"
+done
+
+# tmux is intentionally installed for long-lived SSH work. Keep both languages
+# explicit about normal attach/detach use and recovery from a damaged terminal
+# after an interrupted interactive SSH session.
+for daily_doc in "${REPO_DIR}/docs/daily-use.md" "${REPO_DIR}/docs/daily-use_jp.md"; do
+  grep -Fq -- 'tmux new -As work' "$daily_doc" \
+    || fail "daily-use guide omits the recommended tmux session command: $daily_doc"
+  grep -Fq -- 'tmux attach -t work' "$daily_doc" \
+    || fail "daily-use guide omits tmux reattachment: $daily_doc"
+  grep -Fq -- 'stty sane' "$daily_doc" \
+    || fail "daily-use guide omits broken-terminal recovery: $daily_doc"
+done
+
+# GitHub integration is a first-class workflow, not an unindexed credential
+# snippet. Keep both languages explicit about separate Git/API credentials,
+# feature-branch PR creation, and protected-main human review.
+for github_doc in \
+    "${REPO_DIR}/docs/github-integration.md" \
+    "${REPO_DIR}/docs/github-integration_jp.md"; do
+  for marker in \
+      'github-abduction' \
+      'github-token' \
+      'Add permissions' \
+      'Contents | Read-only' \
+      'Block force pushes' \
+      'agent/import-isabelle-reference' \
+      'gh pr create' \
+      'Closes #1'; do
+    grep -Fq -- "$marker" "$github_doc" \
+      || fail "GitHub integration guide omits '$marker': $github_doc"
+  done
+done
+
+for credential_doc in \
+    "${REPO_DIR}/docs/credentials.md" \
+    "${REPO_DIR}/docs/credentials_jp.md"; do
+  ! grep -Fq -- 'install -m 0600 /dev/null' "$credential_doc" \
+    || fail "credential guide restored the confusing /dev/null file idiom: $credential_doc"
 done
 
 for required_text in \
@@ -233,6 +306,9 @@ for required_text in \
     "https://opencode.ai/install" \
     "aider-chat@latest" \
     "https://ollama.com/install.sh" \
+    "https://cli.github.com/packages/githubcli-archive-keyring.gpg" \
+    "6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b" \
+    "https://cli.github.com/packages stable main" \
     "https://elan.lean-lang.org/elan-init.sh" \
     "https://www.cl.cam.ac.uk/research/hvg/Isabelle/dist/" \
     "https://get-ghcup.haskell.org" \
@@ -505,13 +581,16 @@ awk "
 " "$SETUP_SCRIPT" \
   || fail "the guest cloud-init cleanup no longer aborts on unexpected errors"
 
-# Swarm roles are independent of libvirt VM names. Require explicit placeholders,
-# composite subgroup tags, and the secure helper path in both languages.
+# Swarm roles are independent of machine identity. Require explicit VM
+# placeholders, identity-preserving Tailscale examples, composite subgroup
+# tags, and the secure helper path in both languages.
 for swarm_doc in "${REPO_DIR}/docs/swarm.md" "${REPO_DIR}/docs/swarm_jp.md"; do
   grep -Fq -- 'YOUR_MANAGER_LIBVIRT_VM_NAME' "$swarm_doc" \
     || fail "swarm guide omits the manager VM placeholder: $swarm_doc"
   grep -Fq -- 'YOUR_WORKER_LIBVIRT_VM_NAME' "$swarm_doc" \
     || fail "swarm guide omits the worker VM placeholder: $swarm_doc"
+  grep -Fq -- '--name "$(hostname)"' "$swarm_doc" \
+    || fail "swarm guide does not preserve the VM name in Tailscale: $swarm_doc"
   grep -Fq -- 'tag:swarm-research-a-manager' "$swarm_doc" \
     || fail "swarm guide omits composite subgroup tags: $swarm_doc"
   grep -Fq -- 'tag:swarm-research-b-worker' "$swarm_doc" \

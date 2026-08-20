@@ -19,6 +19,104 @@ The script does not enable VM autostart. Enable it in `virt-manager` only if the
 guest should consume memory and expose its network services whenever the host
 boots.
 
+## Keep long-running work alive with `tmux`
+
+KVM-Agent installs `tmux` in the guest. Use it for coding agents, proof search,
+builds, and other work that should continue if the Mac sleeps, Wi-Fi changes,
+Tailscale reconnects, or an SSH session is interrupted.
+
+For most daily work, one named session is enough:
+
+```bash
+tmux new -As work
+```
+
+This attaches to the existing `work` session if one exists, or creates it if
+not. Start Claude Code, Codex, OpenCode, Isabelle jobs, or other long-running
+commands inside that session.
+
+Useful commands:
+
+```text
+Ctrl-b d       detach and leave the work running
+Ctrl-b c       create a new window
+Ctrl-b n       next window
+Ctrl-b p       previous window
+Ctrl-b ,       rename the current window
+Ctrl-b [       enter scroll/copy mode; press q to leave it
+```
+
+From a fresh SSH connection:
+
+```bash
+tmux ls
+tmux attach -t work
+```
+
+`tmux` protects a process from terminal and SSH disconnections. It does **not**
+survive a VM shutdown or reboot, and it is not a security boundary.
+
+## Run one GitHub issue through one agent branch
+
+For a GitHub-connected project, use a protected-default-branch routine rather
+than asking the agent to edit `main`:
+
+1. write a bounded GitHub issue with acceptance criteria and test commands;
+2. start the agent inside the repository and tell it the issue number;
+3. have it update from `origin/main` and create an `agent/...` branch;
+4. have it edit, test, commit, push the branch, and run `gh pr create` with
+   `Closes #ISSUE`;
+5. inspect the diff, checks, discussion, dependency provenance, and submodule
+   commit on GitHub; and
+6. merge the protected `main` yourself, then fast-forward the VM checkout.
+
+An issue on GitHub does not automatically start a local CLI agent. The agent
+can handle the branch push and PR creation once a human starts it with the
+project-scoped credentials already loaded. Keep the agent out of the ruleset
+bypass list and do not grant its API token Contents write.
+
+The complete initial setup, exact credential split, current fine-grained-token
+UI, commands, and failure recovery are in
+[GitHub integration for a local coding-agent VM](github-integration.md).
+
+## Recover a garbled terminal after an interrupted SSH session
+
+Interactive full-screen programs can leave a terminal in a strange state when
+SSH is interrupted: characters may not echo, line breaks may look wrong, or the
+screen may appear to contain gibberish.
+
+If a foreground program is still running, first try:
+
+```text
+Ctrl-C
+```
+
+If SSH has already dropped and you are back at the local shell (for example,
+the Mac terminal), repair **that terminal** with:
+
+```bash
+reset
+```
+
+Even if typed characters are invisible or displayed incorrectly, type `reset`
+and press Enter. If the terminal is still broken, try:
+
+```bash
+stty sane
+reset
+```
+
+Then reconnect to the VM and resume the existing `tmux` session:
+
+```bash
+ssh YOUR_VM_NAME
+tmux attach -t work
+```
+
+If SSH is still connected but only the remote shell display is corrupted, the
+same `Ctrl-C` then `reset` sequence can be run in that shell. Do not reboot the
+VM merely to repair terminal state.
+
 ## Resize an existing VM without rebuilding
 
 Shut the guest down normally, then change its persistent RAM and/or vCPU

@@ -29,8 +29,8 @@ GUI login も確認し、その後、この project に必要な最小 credentia
 |---|---|
 | OpenAI/Anthropic interactive login | Guest 内の初回 flow を使う。可能なら別の信頼端末から MFA/passkey を完了する。VM の破棄・共有前に sign out する。 |
 | API key | Project 固有、短期、失効可能、支出上限付きの key を優先する。必要な guest だけへ置く。 |
-| Git hosting token | Organization 管理ではなく repository 限定 read/write。短期 branch または fork を優先する。 |
-| Source hosting 用 SSH key | Guest 内で project 専用 key を作る。Host の汎用 private key を VM へコピーしない。 |
+| Git hosting API token | 必要な issue/PR permission だけを持つ fine-grained・repository-selected token を使う。Git push を別 deploy key で行う場合は Contents read-only に保つ。 |
+| Source hosting 用 SSH key | Guest 内で repository 専用 key を作る。Repository deploy key を優先し、host の汎用 private key を VM へコピーしない。 |
 | Commit signing key | Review 済み commit を信頼 workstation で sign するか、限定 guest key を使う。高価値 personal signing key を import しない。 |
 | Cloud administrator credential | 自律 agent guest へ入れない。scope を狭くした workload identity を作る。 |
 | Ollama Cloud login | Remote-provider credential として扱う。CLI が local でも inference は local にならない。 |
@@ -43,15 +43,27 @@ project 設定を調べることがあります。一 command または一 proje
 credential を global export しないでください。
 
 Provider credential store、または permission を限定した file を読む shell wrapper を
-優先します。
+優先します。次は private directory と空 file を作り、その file を editor で開く
+command です。
 
 ```bash
-install -m 0600 /dev/null ~/.config/project-agent.env
+mkdir -p ~/.config/project-agent
+chmod 700 ~/.config/project-agent
+touch ~/.config/project-agent/credentials.env
+chmod 600 ~/.config/project-agent/credentials.env
+nano ~/.config/project-agent/credentials.env
 ```
 
+`touch` は存在しない場合に空 file を作るだけで、software を install しません。
 Guest 内で手動編集し、必要 command だけで読み、Git ignore を確認します。Secret を
 command-line argument へ直接書かないでください。shell history と process listing に
 残る可能性があります。
+
+一つの project 専用 VM では、scope の狭い token 一つを mode `600` file から
+`~/.bashrc` で読むことは実用的な選択です。その場合、全 interactive shell とそこから
+開始した agent が token を取得します。複数 client・複数 project を混在させる VM では
+使わないでください。具体的な GitHub pattern と deploy-key/API-token authority の分離は
+[GitHub integration](github-integration_jp.md)に記載しています。
 
 Guest file permission は Unix account 間の偶発的 access を減らしますが、同じ
 `agent` user または guest sudo で動く agent は止めません。
@@ -101,8 +113,10 @@ control を使います。
 - Release、package publish、billing、organization administration scope なし。
 - 別の信頼端末からの迅速な失効。
 
-最も狭い安全側の既定は、read-only repository access と patch export です。Workflow を
-実質的に改善する場合だけ write access を与えます。
+最も狭い安全側の既定は、read-only repository access と patch export です。Agent branch
+への直接 push が workflow を実質的に改善する場合は repository-only deploy key を使い、
+`main` を保護し、merge authority を human reviewer に残します。より広い write access
+は具体的な用途がある場合だけ付与します。
 
 ## Snapshot と clone
 

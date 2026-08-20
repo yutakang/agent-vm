@@ -8,8 +8,8 @@
 - Tailscale 経由で agent VM に接続する、別の**信頼済み Mac**
 
 `YOUR_...` と書かれた語はすべて placeholder です。実際の値へ置き換えてください。
-`research-a-manager` のような名前は、明示的に表示した例であり、必須の名前では
-ありません。
+通常運用では、一意な VM 名を一つ決め、libvirt domain、guest hostname、Tailscale
+device、Mac SSH alias に同じ名前を使うことを推奨します。
 
 ## 最短の安全な手順
 
@@ -34,7 +34,7 @@ kvm-agent-host pull YOUR_LIBVIRT_VM_NAME Work/agent-result.patch
 2. Mac 上で、この repository から次を実行します。
 
    ```bash
-   ./macos/setup-secure-access.sh YOUR_VM_TAILSCALE_NAME
+   ./macos/setup-secure-access.sh YOUR_VM_NAME
    ```
 
 3. 表示された `kvm-agent-authorize-controller-key ...` command を、VM のローカル
@@ -42,7 +42,7 @@ kvm-agent-host pull YOUR_LIBVIRT_VM_NAME Work/agent-result.patch
 4. Mac から接続します。
 
    ```bash
-   ssh YOUR_VM_TAILSCALE_NAME
+   ssh YOUR_VM_NAME
    ```
 
 5. この接続へ依存する前に、[複数の独立 swarm を一つの tailnet に置く](swarm_jp.md#一つの-tailnet-に複数の独立-swarm-を置く)
@@ -53,20 +53,24 @@ Mac helper はこの VM 専用の key を作ります。Passphrase の設定を�
 
 ## どの名前が何を指すのか
 
-次の識別子は別々の仕組みに属します。似た名前にできますが、交換可能ではありません。
+次の identifier は別々の仕組みに属しますが、KVM-Agent では user が目にする四つの VM
+identity に意図的に同じ名前を使うことを推奨します。これにより `virsh`、Tailscale、
+`ssh` が同じ machine 名を指します。
 
-| 識別子 | 使う場所 | 明示的な例 |
+| 識別子 | 使う場所 | 推奨例 |
 |---|---|---|
 | 物理 host の呼び名 | 自分のメモだけ | `ThinkPad host` |
-| Libvirt VM 名 | `--name`、`virsh`、`kvm-agent-host` | `agent-research-a` |
-| Guest Linux hostname | VM 内部 | `agent-research-a` |
+| Libvirt VM 名 | `--name`、`virsh`、`kvm-agent-host` | `vm-workstation-01` |
+| Guest Linux hostname | VM 内部 | `vm-workstation-01` |
+| Tailscale device 名 | Machines page、MagicDNS | `vm-workstation-01` |
+| Mac SSH alias | `ssh ALIAS` | `vm-workstation-01` |
 | Guest login | SSH/Linux account | `agent` |
-| Tailscale device 名 | Machines page、MagicDNS | `research-a-manager` |
-| 複合 Tailscale tag | Tailnet policy | `tag:swarm-research-a-manager` |
-| Mac SSH alias | `ssh ALIAS` | `research-a-manager` |
+| Tailscale tag | Tailnet policy | `tag:development` または `tag:swarm-research-a-manager` |
 
-`--name` は **libvirt domain 名と guest Linux hostname** を意味します。物理 host の
-名前ではありません。Swarm role も VM を改名しません。
+`--name` は **libvirt domain 名と guest Linux hostname** を設定します。Tailscale 参加時は
+`--name` へ同じ名前を明示し、Mac でも既定 SSH alias に同じ名前を使います。物理 host
+の呼び名と Tailscale tag は別概念です。Tag は security role/group を表し、machine
+identity の代わりにはしません。
 
 既存 VM の libvirt 名は物理 Ubuntu host で確認します。
 
@@ -131,13 +135,13 @@ Helper は現在の DHCP lease を発見し、内部で次を固定します。
 Mac 上で実行します。
 
 ```bash
-./macos/setup-secure-access.sh YOUR_VM_TAILSCALE_NAME
+./macos/setup-secure-access.sh YOUR_VM_NAME
 ```
 
 既定以外の guest user または別 local alias を使う場合:
 
 ```bash
-./macos/setup-secure-access.sh YOUR_VM_TAILSCALE_NAME \
+./macos/setup-secure-access.sh YOUR_VM_NAME \
   --alias YOUR_LOCAL_SSH_ALIAS \
   --user YOUR_GUEST_USER
 ```
@@ -300,12 +304,12 @@ Remote-SSH 等は動きません。必要性が追加 channel の risk を上回
 Mac:
 
 ```bash
-./macos/setup-secure-access.sh YOUR_VM_TAILSCALE_NAME \
+./macos/setup-secure-access.sh YOUR_VM_NAME \
   --add-remote-editor-alias
 ```
 
 VM 内では表示された `--allow-port-forwarding` 付き command を使い、editor には
-`YOUR_VM_TAILSCALE_NAME-editor` を指定します。通常 shell alias は
+`YOUR_VM_NAME-editor` を指定します。通常 shell alias は
 `ClearAllForwardings yes` のままです。Agent/X11 forwarding は両 alias とも無効です。
 
 後で deny-forwarding baseline に戻すには、`--allow-remote-editor` なしで

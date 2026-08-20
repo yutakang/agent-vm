@@ -30,20 +30,21 @@ Mac access と Tailscale/SSH key の役割は、先に
 
 ## 名前と command の実行場所
 
-次は別々の識別子です。
+次の identifier は役割が異なります。Machine identity は、libvirt、guest hostname、
+Tailscale、Mac SSH alias で一つの一意な VM 名に揃えることを推奨します。Swarm group は
+tag/policy layer に分離します。
 
-| 識別子 | Placeholder | 明示的な例 |
+| 識別子 | Placeholder | 推奨例 |
 |---|---|---|
-| manager の libvirt VM 名 | `YOUR_MANAGER_LIBVIRT_VM_NAME` | `agent-research-a-manager` |
-| worker の libvirt VM 名 | `YOUR_WORKER_LIBVIRT_VM_NAME` | `agent-research-a-worker` |
+| manager VM/libvirt/hostname/Tailscale 名 | `YOUR_MANAGER_LIBVIRT_VM_NAME` | `vm-manager-01` |
+| worker VM/libvirt/hostname/Tailscale 名 | `YOUR_WORKER_LIBVIRT_VM_NAME` | `vm-worker-01` |
 | swarm group | `YOUR_SWARM_GROUP` | `research-a` |
-| manager Tailscale 名 | `GROUP-manager` から自動生成 | `research-a-manager` |
-| worker Tailscale 名 | `GROUP-worker` から自動生成 | `research-a-worker` |
 | manager tag | `tag:swarm-GROUP-manager` から自動生成 | `tag:swarm-research-a-manager` |
 | worker tag | `tag:swarm-GROUP-worker` から自動生成 | `tag:swarm-research-a-worker` |
 
-`--name` は常に libvirt VM 名兼 guest Linux hostname です。Swarm role は VM を
-改名しません。
+VM setup 時の `--name` は libvirt VM 名と guest Linux hostname を設定します。Swarm role
+は VM を改名しません。Tailscale 参加時にも同じ guest hostname を明示し、device 名を
+一致させます。
 
 | 実行場所 | 目的 | Command |
 |---|---|---|
@@ -113,18 +114,27 @@ policy test が成功した場合だけ保存します。
 Manager VM 内:
 
 ```bash
-kvm-agent-swarm-tailscale-up --group YOUR_SWARM_GROUP
+kvm-agent-swarm-tailscale-up \
+  --group YOUR_SWARM_GROUP \
+  --name "$(hostname)"
 ```
 
 Worker VM 内:
 
 ```bash
-kvm-agent-swarm-tailscale-up --group YOUR_SWARM_GROUP
+kvm-agent-swarm-tailscale-up \
+  --group YOUR_SWARM_GROUP \
+  --name "$(hostname)"
 ```
 
-Helper は device 名と一つの複合 role tag を作り、設定 reset、subnet route 拒否、exit node
-なし、Tailscale SSH 無効の `tailscale up` を実行します。意図した tailnet へ browser
-authentication を完了します。物理 host は参加しません。
+明示した `--name "$(hostname)"` により、Tailscale device 名を VM/libvirt/guest 名と
+一致させます。Helper は group から一つの複合 role tag を作り、設定 reset、subnet route
+拒否、exit node なし、Tailscale SSH 無効の `tailscale up` を実行します。意図した
+tailnet へ browser authentication を完了します。物理 host は参加しません。
+
+互換性のため `--name` の省略も可能です。その場合は `research-a-manager` のような
+device 名を helper が生成します。Swarm 専用の簡易 deployment では便利ですが、直接
+運用する machine では既存の一意な VM 名を再利用することを推奨します。
 
 両 VM で確認します。
 
@@ -178,7 +188,7 @@ kvm-agent-swarm-configure-worker \
   SHA256:PASTE_THE_WORKER_HOST_FINGERPRINT
 ```
 
-Group `research-a` の worker 名の例は `research-a-worker` です。Helper は fingerprint
+Worker 名が `vm-worker-01` なら、ここでも `vm-worker-01` を使います。Helper は fingerprint
 mismatch を拒否し、`agent-worker` account、guest-local key、`ForwardAgent no`、
 `ForwardX11 no`、`StrictHostKeyChecking yes` の専用 SSH config を作ります。
 

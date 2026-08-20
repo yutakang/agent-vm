@@ -21,8 +21,9 @@ The repository has one setup and recovery command:
 
 The script installs the host virtualization stack, authenticates an official
 Ubuntu cloud image, creates the VM, installs a minimal Ubuntu desktop, installs
-the five requested tools, and waits for the result. Day-to-day operation happens
-through the familiar `virt-manager` GUI.
+the five requested tools plus the current official GitHub CLI, and waits for
+the result. Day-to-day operation happens through the familiar `virt-manager`
+GUI.
 
 An opt-in reduced formal-methods environment is available:
 
@@ -90,18 +91,22 @@ can control the VM. Coding agents are never installed on the host.
 
 ## Names used in commands
 
-KVM-Agent uses several independent names. In documentation, every `YOUR_...`
-word is a placeholder and every concrete sample name is labelled as an example.
+Several systems assign identifiers to the same VM. They are technically
+independent, but using different names for one machine is an easy source of
+operator error. **Recommended convention: choose one globally unique VM name
+and reuse it as the libvirt name, guest hostname, Tailscale device name, and
+Mac SSH alias.**
 
-| Name | Example | Used by |
+| Name | Recommended example | Used by |
 |---|---|---|
-| Libvirt VM name and guest hostname | `agent-research-a` | `--name`, `virsh`, `kvm-agent-host` |
+| Libvirt VM name and guest hostname | `vm-workstation-01` | `--name`, `virsh`, `kvm-agent-host` |
+| Tailscale device name | `vm-workstation-01` | MagicDNS and Machines page |
+| Mac SSH alias | `vm-workstation-01` | `ssh` and `scp` on macOS |
 | Guest login | `agent` | Linux and OpenSSH |
-| Tailscale device name | `research-a-manager` | MagicDNS and Machines page |
-| Composite Tailscale tag | `tag:swarm-research-a-manager` | Directional grants |
-| Mac SSH alias | `research-a-manager` | `ssh` and `scp` on macOS |
+| Tailscale tag | `tag:development` or a composite swarm tag | Access policy; describes trust/role, not machine identity |
 
-The physical host's informal name is not an argument to `--name`. See
+The physical host's informal name is separate, and a Tailscale tag should
+describe a security role or group rather than replace the machine name. See
 [Secure remote access](docs/remote-access.md#which-name-means-what) before
 connecting several machines.
 
@@ -118,9 +123,9 @@ From the ordinary Ubuntu host account, the script:
 5. asks for a local GUI password and creates a dedicated recovery SSH key;
 6. creates a graphical VM with SPICE, virtio video, clipboard integration,
    an Ubuntu desktop, and no host directory share;
-7. downloads and runs the official Codex, Claude Code, OpenCode, and Ollama
-   installers inside the guest, and installs Aider in a per-user `uv`
-   environment; and
+7. installs GitHub CLI from GitHub's official APT repository, downloads and
+   runs the official Codex, Claude Code, OpenCode, and Ollama installers inside
+   the guest, and installs Aider in a per-user `uv` environment; and
 8. when `--formal-methods` is selected, installs Lean through `elan`,
    Isabelle2025-2/HOL from its checksum-verified official Linux archive,
    GHC/Cabal/HLS through GHCup, HLint through Cabal, and VS Code with the
@@ -249,10 +254,14 @@ claude
 opencode
 aider
 ollama --version
+gh --version
 ```
 
 Each coding agent performs its own first-run authentication or provider setup.
 Do that only after reading [Credential handling](docs/credentials.md).
+For a private repository, protected `main`, project-scoped deploy key,
+fine-grained API token, and issue-to-pull-request routine, follow
+[GitHub integration for a local coding-agent VM](docs/github-integration.md).
 
 With `--formal-methods`, the same guest also supports:
 
@@ -463,15 +472,22 @@ The VM is not configured to start automatically with the host.
 A good working cycle is:
 
 1. create or restore a clean snapshot;
-2. place only the project data and revocable credentials needed for this task
-   in the guest;
-3. run the agent and review its commits or patch;
-4. export the reviewed result; and
-5. discard with `remove-kvm-agent.sh`, or roll back the VM, when its state is
+2. clone the private repository with a project-only deploy key and add only the
+   revocable credentials needed for that project;
+3. write a bounded GitHub issue, then start the local agent with its issue
+   number;
+4. let the agent work on an `agent/...` branch, run checks, push that branch,
+   and open a pull request;
+5. review CI, the diff, provenance, and discussion on GitHub, then merge
+   `main` yourself; and
+6. discard with `remove-kvm-agent.sh`, or roll back the VM, when its state is
    no longer trusted.
 
 See [Daily operation](docs/daily-use.md) for snapshots, updates, SSH recovery,
-and data transfer.
+data transfer, `tmux` for long-running agent sessions, and terminal recovery
+after an interrupted SSH connection. See
+[GitHub integration](docs/github-integration.md) for the complete repository
+setup and issue-to-pull-request contract.
 
 ### Transfer files between the host and guest
 
@@ -540,17 +556,30 @@ moving installers with an internally approved golden image or pinned bundle.
 Read [SECURITY.md](SECURITY.md) before adding confidential source code,
 long-lived keys, production data, or expensive API credentials.
 
-## Documentation
+## Documentation index
+
+### Getting started and operation
+
+- [Daily operation](docs/daily-use.md)
+- [GitHub integration for a local coding-agent VM](docs/github-integration.md)
+- [Secure access from an Ubuntu host or macOS controller](docs/remote-access.md)
+- [Troubleshooting](docs/troubleshooting.md)
+
+### Security and architecture
 
 - [Security policy and threat model](SECURITY.md)
 - [Design and trust boundaries](docs/design.md)
-- [Daily operation](docs/daily-use.md)
-- [Secure access from an Ubuntu host or macOS controller](docs/remote-access.md)
 - [Credential handling](docs/credentials.md)
+
+### Optional environments and workflows
+
 - [Agent tools and model services](docs/agent-tools-and-model-services.md)
 - [Reduced formal-methods environment](docs/formal-methods.md)
 - [Cross-host manager/worker VMs](docs/swarm.md)
-- [Troubleshooting](docs/troubleshooting.md)
+- [Automatic research journals](docs/journal.md)
+
+### Background and legal
+
 - [Primary upstream references](docs/references.md)
 - [Disclaimer](DISCLAIMER.md)
 

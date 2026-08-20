@@ -1480,12 +1480,15 @@ Usage:
   kvm-agent-swarm-tailscale-up --group GROUP [--name DEVICE_NAME]
   kvm-agent-swarm-tailscale-up --name DEVICE_NAME --tag TAG
 
-Recommended example (the word "research-a" is only an example group name):
-  kvm-agent-swarm-tailscale-up --group research-a
+Recommended example: preserve the VM's existing hostname as its Tailscale name
+while the group determines the composite security tag:
+  kvm-agent-swarm-tailscale-up --group research-a --name "$(hostname)"
 
---group derives both a unique device name and one composite role tag. Define
-that tag and its grants in the Tailscale policy before running this command.
-See docs/swarm.md in the KVM-Agent repository.
+The word "research-a" is only an example group name. --group always derives one
+composite role tag. If --name is omitted, it also derives a device name such as
+research-a-manager for compatibility. Define the tag and its grants in the
+Tailscale policy before running this command. See docs/swarm.md in the
+KVM-Agent repository.
 EOF
   exit "$status"
 }
@@ -1921,7 +1924,7 @@ if [[ "$OPERATION" == "add-swarm" ]]; then
   printf '\nNext steps inside the normal sudo-capable guest account:\n'
   if [[ "$SWARM_NETWORK" == "tailscale" ]]; then
     printf '  define the composite tag and grants in Tailscale first\n'
-    printf '  kvm-agent-swarm-tailscale-up --group YOUR_SWARM_GROUP\n'
+    printf '  kvm-agent-swarm-tailscale-up --group YOUR_SWARM_GROUP --name "$(hostname)"\n'
   else
     printf '  create and review /etc/wireguard/wg0.conf\n'
   fi
@@ -2297,6 +2300,8 @@ root_runtime_home="/root"
 isabelle_version="Isabelle2025-2"
 isabelle_archive_url="https://www.cl.cam.ac.uk/research/hvg/Isabelle/dist/${isabelle_version}_linux.tar.gz"
 isabelle_archive_sha256="a20a507bc7c1270d8be96a9f3fbec06345387789d2dc2c4d3df6260d47bfb33c"
+github_cli_keyring_url="https://cli.github.com/packages/githubcli-archive-keyring.gpg"
+github_cli_keyring_sha256="6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b"
 
 [[ -n "$guest_home" && -d "$guest_home" ]] || {
   echo "Cannot resolve guest home for $guest_user." >&2
@@ -2507,11 +2512,13 @@ apt-get install -y \
   ca-certificates \
   curl \
   git \
+  gnupg \
   jq \
   ripgrep \
   rsync \
   tmux \
   unzip \
+  wget \
   zstd \
   build-essential \
   python3 \
@@ -2523,14 +2530,12 @@ if [[ "$with_formal_methods" == "yes" ]]; then
   echo "Installing Ubuntu prerequisites for Lean, Isabelle and Haskell..."
   apt-get install -y \
     debconf-utils \
-    gnupg \
     libffi-dev \
     libgmp-dev \
     libncurses-dev \
     libnuma-dev \
     libtinfo-dev \
     pkg-config \
-    wget \
     xz-utils
   apt-get clean
 fi
@@ -2585,6 +2590,36 @@ ufw --force enable >/dev/null
 systemctl enable ufw.service
 ufw status verbose
 
+# Installers and large archives are staged on the root filesystem, not under
+# /run (a small RAM-backed tmpfs on Ubuntu) or a predictable world-writable
+# /tmp path. The directory is traversable but not writable by anyone except
+# root, and each staged file stays root-owned and read-only. This gives the
+# 1+ GiB Isabelle archive access to the verified VM disk capacity and prevents
+# the guest user from altering an installer before it runs.
+install -d -o root -g root -m 0711 "$staging_root"
+staging_dir="$(mktemp -d "${staging_root}/stage.XXXXXXXX")"
+chmod 0711 "$staging_dir"
+
+echo "Installing GitHub CLI from GitHub's official APT repository..."
+github_cli_keyring_download="${staging_dir}/githubcli-archive-keyring.gpg"
+curl --proto '=https' --tlsv1.2 --fail --show-error --location --retry 3 \
+  "$github_cli_keyring_url" --output "$github_cli_keyring_download"
+printf '%s  %s\n' \
+  "$github_cli_keyring_sha256" "$github_cli_keyring_download" \
+  | sha256sum --check --strict -
+install -d -o root -g root -m 0755 \
+  /etc/apt/keyrings /etc/apt/sources.list.d
+install -o root -g root -m 0644 "$github_cli_keyring_download" \
+  /etc/apt/keyrings/githubcli-archive-keyring.gpg
+rm -f -- "$github_cli_keyring_download"
+printf '%s\n' \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+  > /etc/apt/sources.list.d/github-cli.list
+apt-get update
+apt-get install -y gh
+apt-get clean
+gh --version
+
 if [[ "$swarm_role" != "none" ]]; then
   /usr/local/sbin/kvm-agent-swarm-provision \
     "$swarm_role" "$swarm_network" "$guest_user"
@@ -2631,16 +2666,6 @@ as_guest() {
       XDG_CACHE_HOME="$guest_home/.cache" \
       PATH="$guest_path" "$@"
 }
-
-# Installers and large archives are staged on the root filesystem, not under
-# /run (a small RAM-backed tmpfs on Ubuntu) or a predictable world-writable
-# /tmp path. The directory is traversable but not writable by anyone except
-# root, and each staged file stays root-owned and read-only. This gives the
-# 1+ GiB Isabelle archive access to the verified VM disk capacity and prevents
-# the guest user from altering an installer before it runs.
-install -d -o root -g root -m 0711 "$staging_root"
-staging_dir="$(mktemp -d "${staging_root}/stage.XXXXXXXX")"
-chmod 0711 "$staging_dir"
 
 install_guest_script() {
   local tool_name="$1"
@@ -2848,6 +2873,7 @@ rm -f -- "$emergency_reserve"
   as_guest claude --version
   as_guest opencode --version
   as_guest aider --version
+  gh --version
   env HOME="$root_runtime_home" OLLAMA_HOST=127.0.0.1:11434 ollama --version
 } > /var/lib/kvm-agent/installed-versions.txt
 chmod 0644 /var/lib/kvm-agent/installed-versions.txt
@@ -3037,7 +3063,7 @@ print_next_steps() {
     if [[ "$SWARM_NETWORK" == "tailscale" ]]; then
       printf 'Join the guest to the intended tailnet manually with:\n'
       printf '  define the composite tag and grants in Tailscale first\n'
-      printf '  kvm-agent-swarm-tailscale-up --group YOUR_SWARM_GROUP\n'
+      printf '  kvm-agent-swarm-tailscale-up --group YOUR_SWARM_GROUP --name "$(hostname)"\n'
     else
       printf 'Create and review /etc/wireguard/wg0.conf before enabling wg-quick@wg0.\n'
     fi

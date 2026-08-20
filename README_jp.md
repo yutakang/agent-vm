@@ -21,9 +21,9 @@ VM 内で動きます。
 ```
 
 このスクリプトがホストの仮想化環境を導入し、Ubuntu 公式イメージを認証し、
-VM を作り、最小 Ubuntu デスクトップと要求された五つのツールを導入して、
-完了まで待ちます。日常的な操作には使い慣れた `virt-manager` の GUI を
-使います。
+VM を作り、最小 Ubuntu デスクトップ、要求された五つのツール、current 公式
+GitHub CLI を導入して完了まで待ちます。日常的な操作には使い慣れた
+`virt-manager` の GUI を使います。
 
 縮小した形式手法環境は opt-in で追加できます。
 
@@ -85,18 +85,21 @@ system libvirt/KVM 境界を操作する GUI クライアントです。ホス�
 
 ## コマンドで使う名前
 
-KVM-Agent では、用途の異なる複数の名前を使います。文書中の `YOUR_...` は
-すべて置き換えるプレースホルダーです。具体的なサンプル名には「例」と明記します。
+同じ VM に対し、複数の仕組みがそれぞれ identifier を持ちます。技術的には独立ですが、
+一台の machine に別々の名前を使うと運用ミスの原因になります。**一意な VM 名を一つ決め、
+libvirt 名、guest hostname、Tailscale device 名、Mac SSH alias で同じ名前を使うことを
+推奨します。**
 
-| 名前 | 例 | 使用箇所 |
+| 名前 | 推奨例 | 使用箇所 |
 |---|---|---|
-| libvirt VM 名兼 guest hostname | `agent-research-a` | `--name`、`virsh`、`kvm-agent-host` |
+| libvirt VM 名兼 guest hostname | `vm-workstation-01` | `--name`、`virsh`、`kvm-agent-host` |
+| Tailscale device 名 | `vm-workstation-01` | MagicDNS、Machines page |
+| Mac の SSH alias | `vm-workstation-01` | macOS の `ssh`、`scp` |
 | guest login 名 | `agent` | Linux、OpenSSH |
-| Tailscale device 名 | `research-a-manager` | MagicDNS、Machines page |
-| Tailscale 複合 tag | `tag:swarm-research-a-manager` | 方向を制限した grants |
-| Mac の SSH alias | `research-a-manager` | macOS の `ssh`、`scp` |
+| Tailscale tag | `tag:development` または swarm 複合 tag | Access policy。machine identity ではなく trust/role を表す |
 
-物理 host の通称は `--name` の引数ではありません。複数 machine を接続する前に
+物理 host の通称は別物です。Tailscale tag も machine 名の代わりではなく、security role
+や group を表すものとして扱います。複数 machine を接続する前に
 [安全なリモートアクセス](docs/remote-access_jp.md#どの名前が何を表すか)を参照してください。
 
 ## スクリプトが行うこと
@@ -112,8 +115,9 @@ KVM-Agent では、用途の異なる複数の名前を使います。文書中�
 5. ローカル GUI 用パスワードを尋ね、専用の復旧 SSH 鍵を作る。
 6. SPICE、virtio video、クリップボード連携、Ubuntu デスクトップを持ち、
    ホストディレクトリを共有しない GUI 付き VM を作る。
-7. Codex、Claude Code、OpenCode、Ollama の公式インストーラーをゲスト内で
-   ダウンロード・実行し、Aider を利用者専用 `uv` 環境へ導入する。
+7. GitHub CLI を GitHub の公式 APT repository から導入し、Codex、Claude Code、
+   OpenCode、Ollama の公式インストーラーをゲスト内でダウンロード・実行し、
+   Aider を利用者専用 `uv` 環境へ導入する。
 8. `--formal-methods` を選んだ場合、Lean を `elan` から、
    Isabelle2025-2/HOL を checksum 検証した公式 Linux archive から、
    GHC/Cabal/HLS を GHCup から、HLint を Cabal から導入し、さらに VS Code と
@@ -241,10 +245,14 @@ claude
 opencode
 aider
 ollama --version
+gh --version
 ```
 
 各コーディングエージェントは、初回起動時に独自の認証またはプロバイダー設定を
 行います。その前に[認証情報の取り扱い](docs/credentials_jp.md)を読んでください。
+Private repository、protected `main`、project-scoped deploy key、fine-grained API token、
+issue-to-pull-request 運用は
+[local coding-agent VM の GitHub integration](docs/github-integration_jp.md)に従ってください。
 
 `--formal-methods` を指定した guest では次も使えます。
 
@@ -445,13 +453,17 @@ shutdown してください。`--force` は物理マシンの電源 cable を抜
 推奨する作業サイクル:
 
 1. クリーンな snapshot を作るか復元する。
-2. この作業に必要なプロジェクトデータと失効可能な認証情報だけをゲストへ入れる。
-3. エージェントを実行し、commit または patch をレビューする。
-4. レビュー済み結果を外へ出す。
-5. VM の状態を信頼できなくなったら `remove-kvm-agent.sh` で破棄するか rollback する。
+2. Project 専用 deploy key で private repository を clone し、その project に必要な
+   失効可能 credential だけを guest へ入れる。
+3. Scope を絞った GitHub issue を書き、issue number を指定して local agent を開始する。
+4. Agent に `agent/...` branch で作業・check・push・pull request 作成を行わせる。
+5. GitHub 上で CI、diff、provenance、discussion を review し、自分で `main` へ merge する。
+6. VM の状態を信頼できなくなったら `remove-kvm-agent.sh` で破棄するか rollback する。
 
-snapshot、更新、復旧 SSH、データ移動については
-[日常運用](docs/daily-use_jp.md)を参照してください。
+snapshot、更新、復旧 SSH、データ移動、長時間 agent session を維持する `tmux`、
+SSH 切断後の terminal recovery については[日常運用](docs/daily-use_jp.md)を参照してください。
+Repository setup と issue-to-pull-request contract の全体は
+[GitHub integration](docs/github-integration_jp.md)を参照してください。
 
 ### ホストとゲストの間でファイルを転送する
 
@@ -520,17 +532,30 @@ image または pin 済み bundle に置き換えてください。
 機密ソース、長期鍵、本番データ、高額 API 認証情報を入れる前に
 [SECURITY_jp.md](SECURITY_jp.md)を読んでください。
 
-## 文書
+## 文書一覧
+
+### 導入・日常運用
+
+- [日常運用](docs/daily-use_jp.md)
+- [Local coding-agent VM の GitHub integration](docs/github-integration_jp.md)
+- [Ubuntu host または macOS controller からの安全なアクセス](docs/remote-access_jp.md)
+- [トラブルシューティング](docs/troubleshooting_jp.md)
+
+### Security・architecture
 
 - [セキュリティポリシーと脅威モデル](SECURITY_jp.md)
 - [設計と信頼境界](docs/design_jp.md)
-- [日常運用](docs/daily-use_jp.md)
-- [Ubuntu host または macOS controller からの安全なアクセス](docs/remote-access_jp.md)
 - [認証情報の取り扱い](docs/credentials_jp.md)
+
+### Optional environment・workflow
+
 - [エージェントツールとモデルサービス](docs/agent-tools-and-model-services_jp.md)
 - [縮小形式手法環境](docs/formal-methods_jp.md)
 - [cross-host manager/worker VM](docs/swarm_jp.md)
-- [トラブルシューティング](docs/troubleshooting_jp.md)
+- [自動 research journal](docs/journal_jp.md)
+
+### 背景資料・法的情報
+
 - [上流の一次資料](docs/references_jp.md)
 - [免責事項](DISCLAIMER_jp.md)
 
